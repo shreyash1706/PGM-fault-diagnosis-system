@@ -1,0 +1,9 @@
+# Updated for Python 3.12 compatibility
+fastapi==0.115.8           # Latest stable for Python 3.12
+uvicorn[standard]==0.34.0  # Latest ASGI server
+redis==5.2.1               # Latest redis client
+psutil==6.1.1              # Updated for Python 3.12
+python-multipart==0.0.20   # Latest multipart handling
+httpx==0.28.1              # Latest HTTP client
+pydantic==2.10.6           # Latest Pydantic for FastAPI
+pydantic-settings==2.7.1   # Settings management

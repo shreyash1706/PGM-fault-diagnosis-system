@@ -1,0 +1,99 @@
+version: '3.8'
+
+networks:
+  fault-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  redis-insight-data:
+    driver: local
+
+services:
+  # ============= VICTIM SERVER =============
+  victim-app:
+    build:
+      context: ./victim-server
+      dockerfile: Dockerfile
+    container_name: victim-app
+    ports:
+      - "8000:8000"
+    networks:
+      - fault-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.1'
+          memory: 256M
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    volumes:
+      - ./victim-server:/app # Mount for development
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=UTC
+
+  # ============= REDIS DATABASE =============
+  redis:
+    image: redis:7-alpine
+    container_name: victim-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - fault-network
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server  --appendonly yes  --maxmemory 200mb  --maxmemory-policy allkeys-lru --save 60 1 --loglevel warning
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # ============= REDIS INSIGHT (Optional GUI) =============
+  redis-insight:
+    image: redis/redisinsight:latest
+    container_name: redis-insight
+    ports:
+      - "5540:5540"
+    networks:
+      - fault-network
+    volumes:
+      - redis-insight-data:/data
+    restart: unless-stopped
+
+  # ============= PROMETHEUS MONITORING =============
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - fault-network
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
