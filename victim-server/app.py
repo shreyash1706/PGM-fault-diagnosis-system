@@ -1,699 +1,356 @@
 """
-Victim Server - Complete with all 4 fault types + Natural Randomness + Automatic Faults
-CPU Spike, Memory Leak, API Latency, and Error Rate
+Victim Server - ULTIMATE FIXED VERSION with GUARANTEED Symptoms
+CPU Spike (80%+), Memory Leak (RAM rises), API Latency (3-8s), Error Rate (30%)
 """
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
 import redis.asyncio as redis
 import psutil
 import time
 import random
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from contextlib import asynccontextmanager
 import uvicorn
 import socket
-import platform
-from typing import Dict, Any, Optional
-from pydantic import BaseModel
+from typing import Dict, List
 import statistics
 import math
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Pydantic models
-class DataUpdate(BaseModel):
-    data: str
-
-class FaultResponse(BaseModel):
-    message: str
-    fault: str
-    timestamp: datetime
-
-class StatusResponse(BaseModel):
-    status: str
-    service: str
-    timestamp: datetime
-    faults_active: Dict[str, bool]
-    system: str
-
-# Global variables for fault injection
+# ============= GLOBAL VARIABLES =============
 fault_active: Dict[str, bool] = {
-    "cpu_spike": False,        # FAULT 1: CPU overload
-    "memory_leak": False,       # FAULT 2: Memory exhaustion
-    "api_latency": False,       # FAULT 3: Slow API responses
-    "error_rate": False         # FAULT 4: Random 500 errors
+    "cpu_spike": False,
+    "memory_leak": False,
+    "api_latency": False,
+    "error_rate": False
 }
 
+# For memory leak - ACTUAL memory consumption
+memory_leak_data: List[bytearray] = []  # Using bytearray for better memory representation
+
 # For tracking metrics
-request_times = []
+request_times: List[float] = []
 error_count = 0
 total_requests = 0
 
 # Redis connection
-redis_client: Optional[redis.Redis] = None
+redis_client = None
 
-# ============= AUTOMATIC FAULTS CONFIGURATION =============
-# Yeh faults apne aap honge - real world ki tarah!
+# ============= CONFIGURATION =============
+class Config:
+    # Automatic fault probabilities
+    AUTO_CPU_PROB = 0.25      # 25% chance
+    AUTO_MEMORY_PROB = 0.25   # 25% chance
+    AUTO_LATENCY_PROB = 0.25  # 25% chance
+    AUTO_ERROR_PROB = 0.25    # 25% chance
+    
+    # Fault duration (seconds)
+    FAULT_DURATION = (20, 40)  # 20-40 seconds
+    
+    # Natural noise
+    CPU_NOISE_PROB = 0.15      # 15% chance
+    CPU_NOISE_RANGE = (2, 8)   # 2-8% natural variation
+    LATENCY_NOISE_PROB = 0.15  # 15% chance
+    LATENCY_NOISE_RANGE = (0.1, 0.4)  # 0.1-0.4s natural delay
 
-class AutomaticFaults:
-    """Faults that happen automatically without manual trigger"""
-    
-    # Probability of automatic faults (checked every 30 seconds)
-    AUTO_CPU_FAULT_PROBABILITY = 0.45   # 15% chance of CPU fault
-    AUTO_MEMORY_FAULT_PROBABILITY = 0.45 # 12% chance of memory leak
-    AUTO_LATENCY_FAULT_PROBABILITY = 0.40 # 18% chance of latency
-    AUTO_ERROR_FAULT_PROBABILITY = 0.40  # 10% chance of error rate
-    
-    # Duration of automatic faults (seconds)
-    FAULT_DURATION_RANGE = (10, 30)  # Fault lasts 10-30 seconds
-    
-    # Cooldown period between faults (seconds)
-    COOLDOWN_PERIOD = 45  # Minimum 45 seconds between faults
-    
-    # Probability of multiple faults occurring together
-    MULTI_FAULT_PROBABILITY = 0.20  # 20% chance of two faults together
+# Track fault end times
+fault_end_times: Dict[str, float] = {}
+fault_tasks: Dict[str, asyncio.Task] = {}
 
-# Track automatic faults
-last_fault_time = 0
-current_auto_faults = []  # Multiple faults can be active
-fault_end_times = {}  # Track end time for each fault
+# ============= BACKGROUND TASKS =============
 
-# ============= NATURAL RANDOMNESS CONFIGURATION =============
-# Yeh settings random fluctuations add karengi realistic behavior ke liye
+async def cpu_hog():
+    """🔥 REAL CPU spike - makes CPU 80-95%"""
+    logger.warning("🔥 CPU HOG STARTED - CPU will spike to 80-95%")
+    while fault_active["cpu_spike"]:
+        # Heavy computation that actually spikes CPU
+        for i in range(5_000_000):
+            # Complex math operations
+            _ = math.sqrt(i) * math.sin(i) * math.cos(i) ** 3
+            _ = math.pow(i, 1.5) * math.log(i + 1)
+            _ = math.exp(math.sin(i)) * math.cos(math.tan(i))
+        await asyncio.sleep(0.01)  # Very tiny break
+    logger.warning("🔥 CPU HOG STOPPED")
 
-class NaturalNoise:
-    """Adds natural randomness to simulate real-world conditions"""
+async def memory_hog():
+    """🧠 REAL memory leak - RAM will increase visibly"""
+    global memory_leak_data
+    chunk_size = 50 * 1024 * 1024  # 50MB chunks - BIGGER for visible effect
+    logger.warning("🧠 MEMORY HOG STARTED - RAM will increase")
     
-    # Random CPU spikes (false positives) - kabhi kabhi bina fault ke CPU up/down ho jayega
-    CPU_NOISE_PROBABILITY = 0.40  # 20% chance of random CPU fluctuation
-    CPU_NOISE_RANGE = (5, 25)     # 5-25% extra CPU usage randomly
-    
-    # Random latency spikes
-    LATENCY_NOISE_PROBABILITY = 0.40  # 25% chance of random latency
-    LATENCY_NOISE_RANGE = (0.5, 3.0)  # 0.5-3.0 second random delay
-    
-    # Random memory fluctuations
-    MEMORY_NOISE_PROBABILITY = 0.45   # 15% chance of memory fluctuation
-    MEMORY_NOISE_RANGE = (3, 12)      # 3-12% memory usage variation
-    
-    # Background noise - continuous small variations
-    BACKGROUND_CPU_VARIATION = 45.0    # ±5% continuous CPU variation
-    BACKGROUND_LATENCY_VARIATION = 300 # ±300ms continuous latency variation
-    
-    # False positive/negative rates for categorization
-    FALSE_POSITIVE_RATE = 0.4   # 8% chance of false positive
-    FALSE_NEGATIVE_RATE = 0.2    # 8% chance of false negative
+    while fault_active["memory_leak"]:
+        # Add large chunk of memory
+        memory_leak_data.append(bytearray(chunk_size))
+        total_mb = len(memory_leak_data) * 50
+        logger.warning(f"🧠 MEMORY LEAK: {total_mb}MB total")
+        
+        # Force memory to be used
+        for chunk in memory_leak_data:
+            chunk[0] = 1  # Touch memory to keep it
+        await asyncio.sleep(2)  # Add every 2 seconds
+    logger.warning("🧠 MEMORY HOG STOPPED")
 
-# For tracking baseline noise
-baseline_cpu = 5.0
-baseline_memory = 20.0
-
-# ============= AUTOMATIC FAULT TASKS =============
-
-async def check_and_trigger_automatic_faults():
-    """Background task that randomly triggers faults automatically"""
-    global last_fault_time, current_auto_faults, fault_end_times
+async def auto_fault_manager():
+    """Automatically triggers and manages faults"""
+    global fault_end_times, memory_leak_data, fault_tasks
     
     while True:
         try:
             current_time = time.time()
             
-            # Clean up expired faults
-            expired_faults = []
-            for fault, end_time in fault_end_times.items():
-                if current_time > end_time:
-                    if fault in fault_active:
-                        fault_active[fault] = False
-                        expired_faults.append(fault)
-                        logger.info(f"🤖 AUTO-FAULT ENDED: {fault} finished automatically")
+            # ===== CHECK EXPIRED FAULTS =====
+            expired = []
+            for fault, end_time in list(fault_end_times.items()):
+                if current_time > end_time and fault_active.get(fault, False):
+                    fault_active[fault] = False
+                    expired.append(fault)
+                    logger.info(f"✅ AUTO FAULT ENDED: {fault}")
+                    
+                    # Cancel background task if exists
+                    if fault in fault_tasks:
+                        fault_tasks[fault].cancel()
+                        del fault_tasks[fault]
+                    
+                    # Clear memory leak data
+                    if fault == "memory_leak":
+                        memory_leak_data.clear()
             
-            for fault in expired_faults:
-                if fault in fault_end_times:
-                    del fault_end_times[fault]
-                if fault in current_auto_faults:
-                    current_auto_faults.remove(fault)
+            # ===== TRIGGER NEW FAULTS =====
+            # CPU FAULT
+            if not fault_active["cpu_spike"] and random.random() < Config.AUTO_CPU_PROB:
+                duration = random.uniform(*Config.FAULT_DURATION)
+                fault_active["cpu_spike"] = True
+                fault_end_times["cpu_spike"] = current_time + duration
+                task = asyncio.create_task(cpu_hog())
+                fault_tasks["cpu_spike"] = task
+                logger.warning(f"🔥 AUTO CPU FAULT for {duration:.1f}s")
             
-            # Check if cooldown period has passed
-            if current_time - last_fault_time > AutomaticFaults.COOLDOWN_PERIOD:
-                
-                # Don't trigger if too many manual faults are active
-                manual_active = sum(1 for f in fault_active.values() if f)
-                if manual_active < 2:  # Allow up to 2 manual faults
-                    
-                    # Randomly decide to trigger a fault
-                    rand = random.random()
-                    triggered_faults = []
-                    
-                    # Check each fault type
-                    if rand < AutomaticFaults.AUTO_CPU_FAULT_PROBABILITY:
-                        triggered_faults.append("cpu_spike")
-                    
-                    # Check for memory fault (cumulative probability)
-                    elif rand < AutomaticFaults.AUTO_CPU_FAULT_PROBABILITY + AutomaticFaults.AUTO_MEMORY_FAULT_PROBABILITY:
-                        triggered_faults.append("memory_leak")
-                    
-                    # Check for latency fault
-                    elif rand < AutomaticFaults.AUTO_CPU_FAULT_PROBABILITY + AutomaticFaults.AUTO_MEMORY_FAULT_PROBABILITY + AutomaticFaults.AUTO_LATENCY_FAULT_PROBABILITY:
-                        triggered_faults.append("api_latency")
-                    
-                    # Check for error fault
-                    elif rand < AutomaticFaults.AUTO_CPU_FAULT_PROBABILITY + AutomaticFaults.AUTO_MEMORY_FAULT_PROBABILITY + AutomaticFaults.AUTO_LATENCY_FAULT_PROBABILITY + AutomaticFaults.AUTO_ERROR_FAULT_PROBABILITY:
-                        triggered_faults.append("error_rate")
-                    
-                    # Possibly add a second fault (multi-fault scenario)
-                    if triggered_faults and random.random() < AutomaticFaults.MULTI_FAULT_PROBABILITY:
-                        second_fault = random.choice(["cpu_spike", "memory_leak", "api_latency", "error_rate"])
-                        if second_fault not in triggered_faults:
-                            triggered_faults.append(second_fault)
-                            logger.info(f"🤖 MULTI-FAULT: Adding {second_fault} to the mix")
-                    
-                    # Trigger the faults
-                    for fault in triggered_faults:
-                        if not fault_active[fault]:  # Don't override manual faults
-                            duration = random.uniform(*AutomaticFaults.FAULT_DURATION_RANGE)
-                            fault_active[fault] = True
-                            fault_end_times[fault] = current_time + duration
-                            current_auto_faults.append(fault)
-                            logger.warning(f"🤖 AUTO-FAULT STARTED: {fault} for {duration:.1f} seconds")
-                    
-                    if triggered_faults:
-                        last_fault_time = current_time
+            # MEMORY FAULT
+            if not fault_active["memory_leak"] and random.random() < Config.AUTO_MEMORY_PROB:
+                duration = random.uniform(*Config.FAULT_DURATION)
+                fault_active["memory_leak"] = True
+                fault_end_times["memory_leak"] = current_time + duration
+                task = asyncio.create_task(memory_hog())
+                fault_tasks["memory_leak"] = task
+                logger.warning(f"🧠 AUTO MEMORY FAULT for {duration:.1f}s")
             
-            await asyncio.sleep(5)  # Check every 5 seconds
+            # LATENCY FAULT
+            if not fault_active["api_latency"] and random.random() < Config.AUTO_LATENCY_PROB:
+                duration = random.uniform(*Config.FAULT_DURATION)
+                fault_active["api_latency"] = True
+                fault_end_times["api_latency"] = current_time + duration
+                logger.warning(f"🐌 AUTO LATENCY FAULT for {duration:.1f}s")
+            
+            # ERROR FAULT
+            if not fault_active["error_rate"] and random.random() < Config.AUTO_ERROR_PROB:
+                duration = random.uniform(*Config.FAULT_DURATION)
+                fault_active["error_rate"] = True
+                fault_end_times["error_rate"] = current_time + duration
+                logger.warning(f"💥 AUTO ERROR FAULT for {duration:.1f}s")
+            
+            # Log multiple faults
+            active = [f for f, v in fault_active.items() if v]
+            if len(active) > 1:
+                logger.warning(f"🎯 MULTIPLE FAULTS: {active}")
+            
+            await asyncio.sleep(10)  # Check every 10 seconds
             
         except Exception as e:
-            logger.error(f"Error in auto-fault system: {e}")
-            await asyncio.sleep(10)
+            logger.error(f"Auto fault error: {e}")
+            await asyncio.sleep(5)
 
-# For tracking baseline noise
-baseline_cpu = 5.0
-baseline_memory = 20.0
-
+# ============= LIFESPAN =============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    global redis_client, baseline_cpu, baseline_memory
+    global redis_client
     try:
-        redis_client = await redis.from_url(
-            "redis://redis:6379",
-            decode_responses=True,
-            health_check_interval=30
-        )
+        redis_client = await redis.from_url("redis://redis:6379", decode_responses=True)
         await redis_client.ping()
+        await redis_client.set("products", '{"laptop": 999, "mouse": 25}')
         logger.info("✅ Connected to Redis")
-        
-        # Initialize realistic data
-        await redis_client.set("products", '{"laptop": 999, "mouse": 25, "keyboard": 75}')
-        await redis_client.set("users", "1500")
-        await redis_client.set("orders_today", "42")
-        await redis_client.set("start_time", str(time.time()))
     except Exception as e:
         logger.warning(f"⚠️ Redis not available: {e}")
-        redis_client = None
     
-    # Set baseline metrics
-    baseline_cpu = psutil.cpu_percent(interval=1.0)
-    baseline_memory = psutil.virtual_memory().percent
-    
-    # START AUTOMATIC FAULT SYSTEM
-    asyncio.create_task(check_and_trigger_automatic_faults())
-    logger.info("🤖 Automatic fault system started - faults will occur randomly!")
-    
-    logger.info(f"🚀 Victim server started on {socket.gethostname()}")
-    logger.info(f"📊 Baseline CPU: {baseline_cpu:.1f}%, Baseline Memory: {baseline_memory:.1f}%")
+    # Start auto fault manager
+    asyncio.create_task(auto_fault_manager())
+    logger.info("🚀 Server started - AUTO FAULTS ENABLED")
+    logger.info("   • CPU Spike: 80-95% CPU")
+    logger.info("   • Memory Leak: +50MB/2sec (visible RAM increase)")
+    logger.info("   • API Latency: 3-8 second delay")
+    logger.info("   • Error Rate: 30% failures")
     yield
     
-    # Shutdown
+    # Cleanup
+    for task in fault_tasks.values():
+        task.cancel()
     if redis_client:
         await redis_client.close()
-    logger.info("👋 Victim server shutting down")
 
-# Create FastAPI app
-app = FastAPI(
-    title="Victim Server",
-    description="Complete fault diagnosis testbed with 4 fault types + natural randomness + automatic faults",
-    version="5.0.0",
-    lifespan=lifespan
-)
+app = FastAPI(title="Victim Server", version="9.0.0", lifespan=lifespan)
 
-# ============= HELPER FUNCTIONS FOR NATURAL RANDOMNESS =============
-
-def add_natural_cpu_noise(base_cpu: float) -> float:
-    """Add natural random fluctuations to CPU"""
-    global baseline_cpu
-    
-    # Continuous background noise (sinusoidal variation throughout day)
-    time_factor = math.sin(time.time() / 100) * NaturalNoise.BACKGROUND_CPU_VARIATION
-    
-    # Random spikes (false positives)
-    if random.random() < NaturalNoise.CPU_NOISE_PROBABILITY:
-        spike = random.uniform(*NaturalNoise.CPU_NOISE_RANGE)
-        logger.debug(f"🌊 Natural CPU spike: +{spike:.1f}%")
-        return base_cpu + spike + time_factor
-    
-    return base_cpu + time_factor
-
-def add_natural_memory_noise(base_memory: float) -> float:
-    """Add natural random fluctuations to memory"""
-    global baseline_memory
-    
-    # Random memory fluctuations
-    if random.random() < NaturalNoise.MEMORY_NOISE_PROBABILITY:
-        fluctuation = random.uniform(*NaturalNoise.MEMORY_NOISE_RANGE)
-        logger.debug(f"🌊 Natural memory fluctuation: {fluctuation:+.1f}%")
-        return base_memory + fluctuation
-    
-    return base_memory
-
-async def add_natural_latency_noise():
-    """Add natural random latency spikes"""
-    if random.random() < NaturalNoise.LATENCY_NOISE_PROBABILITY:
-        delay = random.uniform(*NaturalNoise.LATENCY_NOISE_RANGE)
-        logger.debug(f"🌊 Natural latency spike: +{delay:.2f}s")
-        await asyncio.sleep(delay)
-
-def get_noisy_cpu() -> float:
-    """Get CPU with natural randomness"""
-    actual_cpu = psutil.cpu_percent(interval=0.3)
-    
-    # Agar fault active hai toh actual CPU do, otherwise add noise
-    if fault_active["cpu_spike"]:
-        return actual_cpu
-    else:
-        return add_natural_cpu_noise(actual_cpu)
-
-def get_noisy_memory() -> float:
-    """Get memory with natural randomness"""
-    actual_memory = psutil.virtual_memory().percent
-    
-    if fault_active["memory_leak"]:
-        return actual_memory
-    else:
-        return add_natural_memory_noise(actual_memory)
-
-# ============= MIDDLEWARE for Tracking =============
+# ============= MIDDLEWARE =============
 @app.middleware("http")
 async def track_requests(request: Request, call_next):
-    """Track request times and error rates"""
     global total_requests, error_count, request_times
-    
     total_requests += 1
-    start_time = time.time()
+    start = time.time()
     
     try:
-        # Add natural latency noise (false positives)
-        await add_natural_latency_noise()
+        # Natural latency noise
+        if not fault_active["api_latency"] and random.random() < 0.15:
+            delay = random.uniform(0.1, 0.4)
+            await asyncio.sleep(delay)
         
         response = await call_next(request)
-        process_time = time.time() - start_time
-        
-        # Keep last 100 request times for latency calculation
-        request_times.append(process_time * 1000)  # Convert to ms
+        process_time = time.time() - start
+        request_times.append(process_time * 1000)
         if len(request_times) > 100:
             request_times.pop(0)
-        
         return response
-    except Exception as e:
+    except Exception:
         error_count += 1
         raise
 
-# ============= ROOT ENDPOINT =============
-@app.get("/")
-async def root():
-    """Root endpoint - shows server status"""
-    # Count active automatic faults
-    auto_faults_active = [f for f in fault_active if fault_active[f]]
-    
-    return {
-        "server": "Victim Server",
-        "status": "running",
-        "version": "5.0.0",
-        "faults_active": fault_active,
-        "auto_faults_active": len(auto_faults_active) > 0,
-        "natural_randomness": {
-            "cpu_noise": f"{NaturalNoise.CPU_NOISE_PROBABILITY*100}% chance",
-            "latency_noise": f"{NaturalNoise.LATENCY_NOISE_PROBABILITY*100}% chance",
-            "memory_noise": f"{NaturalNoise.MEMORY_NOISE_PROBABILITY*100}% chance"
-        },
-        "automatic_faults": {
-            "enabled": True,
-            "check_interval": "5 seconds",
-            "fault_probabilities": {
-                "cpu": f"{AutomaticFaults.AUTO_CPU_FAULT_PROBABILITY*100}%",
-                "memory": f"{AutomaticFaults.AUTO_MEMORY_FAULT_PROBABILITY*100}%",
-                "latency": f"{AutomaticFaults.AUTO_LATENCY_FAULT_PROBABILITY*100}%",
-                "errors": f"{AutomaticFaults.AUTO_ERROR_FAULT_PROBABILITY*100}%"
-            }
-        },
-        "endpoints": {
-            "health": "/health",
-            "products": "/api/products",
-            "users": "/api/users",
-            "metrics": "/api/metrics",
-            "debug": "/api/debug",
-            "faults": {
-                "cpu": "/fault/cpu/{start/stop}",
-                "memory": "/fault/memory/{start/stop}",
-                "latency": "/fault/latency/{start/stop}",
-                "errors": "/fault/errors/{start/stop}"
-            }
-        },
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }    
-
-# ============= MAIN BUSINESS ENDPOINT =============
+# ============= BUSINESS ENDPOINTS =============
 @app.get("/api/products")
 async def get_products():
-    """Main business endpoint - gets product data from Redis"""
     global error_count
     
-    # FAULT 1: CPU Spike affects response time
+    # 🔥 CPU SPIKE - EXTREME heavy computation
     if fault_active["cpu_spike"]:
-        # Simulate CPU contention - do heavy computation
-        for _ in range(1000000):
-            _ = random.random() ** 2
+        for i in range(8_000_000):  # 8 million iterations
+            _ = math.sqrt(i) * math.sin(i) * math.cos(i) ** 3
+            _ = math.pow(i, 1.7) * math.log(i + 1)
     
-    # FAULT 3: API Latency - artificial delay
+    # 🐌 API LATENCY - Significant delay
     if fault_active["api_latency"]:
-        delay = random.uniform(1.0, 3.0)
+        delay = random.uniform(3.0, 8.0)
         await asyncio.sleep(delay)
     
-    # FAULT 4: Error Rate - random failures
-    if fault_active["error_rate"] and random.random() < 0.3:  # 30% error rate
-        error_count += 1
-        logger.warning("⚠️ Random 500 error injected")
-        raise HTTPException(
-            status_code=500, 
-            detail="Internal Server Error (Fault injected)"
-        )
+    # 💥 ERROR RATE - Guaranteed failures
+    if fault_active["error_rate"]:
+        if random.random() < 0.3:  # 30% chance
+            error_count += 1
+            raise HTTPException(status_code=500, detail="Random error injected")
     
-    # Normal operation - get from Redis
-    if redis_client:
-        try:
-            products = await redis_client.get("products")
-            return {
-                "products": products,
-                "source": "redis",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-        except Exception as e:
-            logger.error(f"Redis error: {e}")
-    
-    # Fallback data
-    return {
-        "products": '{"laptop": 999, "mouse": 25, "keyboard": 75}',
-        "source": "fallback",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+    return {"products": "laptop: $999, mouse: $25", "timestamp": datetime.now().isoformat()}
 
 @app.get("/api/users")
 async def get_users():
-    """Another business endpoint"""
     if fault_active["cpu_spike"]:
-        for _ in range(500000):
-            _ = random.random() ** 3
+        for i in range(5_000_000):
+            _ = math.sqrt(i) * math.pow(i, 1.5)
     
     if fault_active["api_latency"]:
-        await asyncio.sleep(random.uniform(0.5, 2.0))
+        await asyncio.sleep(random.uniform(3.0, 8.0))
     
     if fault_active["error_rate"] and random.random() < 0.3:
         raise HTTPException(status_code=500, detail="Random error")
     
-    users = await redis_client.get("users") if redis_client else "1500"
-    return {"active_users": users}
-
-# ============= FAULT INJECTION ENDPOINTS (Manual) =============
-
-# FAULT 1: CPU SPIKE
-@app.post("/fault/cpu/{action}", response_model=FaultResponse)
-async def cpu_fault(action: str):
-    """FAULT 1: CPU Spike - makes the container compute-intensive"""
-    if action == "start":
-        fault_active["cpu_spike"] = True
-        asyncio.create_task(_cpu_spike())
-        return FaultResponse(
-            message="🔥 CPU spike started - API will be slow",
-            fault="cpu_spike",
-            timestamp=datetime.now(timezone.utc)
-        )
-    elif action == "stop":
-        fault_active["cpu_spike"] = False
-        return FaultResponse(
-            message="✅ CPU spike stopped",
-            fault="cpu_spike",
-            timestamp=datetime.now(timezone.utc)
-        )
-    raise HTTPException(status_code=400, detail="Invalid action")
-
-async def _cpu_spike():
-    """Background CPU spike - affects all endpoints"""
-    while fault_active["cpu_spike"]:
-        # Heavy computation that impacts everything
-        start = time.time()
-        while time.time() - start < 1.0:  # 1 second of continuous CPU work
-            [i ** 2 for i in range(100000)]
-        await asyncio.sleep(0.1)
-
-# FAULT 2: MEMORY LEAK
-@app.post("/fault/memory/{action}", response_model=FaultResponse)
-async def memory_fault(action: str):
-    """FAULT 2: Memory Leak - gradually consumes RAM"""
-    if action == "start":
-        fault_active["memory_leak"] = True
-        asyncio.create_task(_memory_leak())
-        return FaultResponse(
-            message="🧠 Memory leak started - RAM will fill up",
-            fault="memory_leak",
-            timestamp=datetime.now(timezone.utc)
-        )
-    elif action == "stop":
-        fault_active["memory_leak"] = False
-        return FaultResponse(
-            message="✅ Memory leak stopped",
-            fault="memory_leak",
-            timestamp=datetime.now(timezone.utc)
-        )
-
-async def _memory_leak():
-    """Background memory leak - eats RAM over time"""
-    leaky_list = []
-    chunk_size = 10 * 1024 * 1024  # 10MB chunks
-    
-    while fault_active["memory_leak"]:
-        # Add memory chunk
-        leaky_list.append('X' * chunk_size)
-        current_mb = len(leaky_list) * 10
-        
-        logger.info(f"🧠 Memory leak: {current_mb}MB used")
-        
-        # When memory gets high, system slows down naturally
-        if current_mb > 100:  # After 100MB, API gets slower
-            logger.warning(f"⚠️ High memory ({current_mb}MB) - API slowing down")
-        
-        await asyncio.sleep(2)
-
-# FAULT 3: API LATENCY
-@app.post("/fault/latency/{action}", response_model=FaultResponse)
-async def latency_fault(action: str):
-    """FAULT 3: API Latency - adds delay to all responses"""
-    if action == "start":
-        fault_active["api_latency"] = True
-        return FaultResponse(
-            message="🐌 API latency started - responses will be slow",
-            fault="api_latency",
-            timestamp=datetime.now(timezone.utc)
-        )
-    elif action == "stop":
-        fault_active["api_latency"] = False
-        return FaultResponse(
-            message="✅ API latency stopped",
-            fault="api_latency",
-            timestamp=datetime.now(timezone.utc)
-        )
-
-# FAULT 4: ERROR RATE
-@app.post("/fault/errors/{action}", response_model=FaultResponse)
-async def errors_fault(action: str):
-    """FAULT 4: Error Rate - injects random 500 errors"""
-    if action == "start":
-        fault_active["error_rate"] = True
-        return FaultResponse(
-            message="💥 Error rate started - 30% of requests will fail",
-            fault="error_rate",
-            timestamp=datetime.now(timezone.utc)
-        )
-    elif action == "stop":
-        fault_active["error_rate"] = False
-        return FaultResponse(
-            message="✅ Error rate stopped",
-            fault="error_rate",
-            timestamp=datetime.now(timezone.utc)
-        )
+    return {"users": 1500, "active": 423}
 
 # ============= METRICS ENDPOINTS =============
-
 @app.get("/health")
 async def health():
-    """Enhanced health check with more metrics + natural randomness"""
-    global error_count, total_requests, request_times
+    global error_count, total_requests, request_times, memory_leak_data
     
-    # Calculate average latency
-    avg_latency = statistics.mean(request_times) if request_times else 0
+    # Get REAL system metrics with longer interval for accuracy
+    cpu = psutil.cpu_percent(interval=2.0)  # 2 second interval for better reading
+    mem = psutil.virtual_memory().percent
+    avg_lat = statistics.mean(request_times) if request_times else 0
+    err_rate = (error_count / total_requests * 100) if total_requests > 0 else 0
     
-    # Calculate error rate
-    error_rate_pct = (error_count / total_requests * 100) if total_requests > 0 else 0
-    
-    redis_status = "disconnected"
-    if redis_client:
-        try:
-            await redis_client.ping()
-            redis_status = "connected"
-        except:
-            redis_status = "error"
-    
-    # Add natural randomness to metrics
-    noisy_cpu = get_noisy_cpu()
-    noisy_memory = get_noisy_memory()
+    # Natural CPU noise only when fault not active
+    if not fault_active["cpu_spike"] and random.random() < 0.15:
+        cpu += random.uniform(2, 8)
+        cpu = min(cpu, 100)
     
     return {
-        "status": "healthy",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now().isoformat(),
         "metrics": {
-            "cpu_percent": round(noisy_cpu, 2),
-            "memory_percent": round(noisy_memory, 2),
-            "avg_latency_ms": round(avg_latency, 2),
-            "error_rate_percent": round(error_rate_pct, 2),
-            "total_requests": total_requests
+            "cpu_percent": round(cpu, 2),
+            "memory_percent": round(mem, 2),
+            "avg_latency_ms": round(avg_lat, 2),
+            "error_rate_percent": round(err_rate, 2),
+            "total_requests": total_requests,
+            "memory_leak_mb": len(memory_leak_data) * 50  # 50MB per chunk
         },
         "faults_active": fault_active,
-        "redis_status": redis_status,
-        "auto_faults_enabled": True
-    }
-
-@app.get("/api/debug")
-async def debug():
-    """Debug endpoint showing current fault states"""
-    return {
-        "faults": fault_active,
-        "stats": {
-            "total_requests": total_requests,
-            "error_count": error_count,
-            "recent_latencies": request_times[-10:] if request_times else []
-        },
-        "auto_faults": {
-            "enabled": True,
-            "last_fault_time": last_fault_time,
-            "active_auto_faults": current_auto_faults
-        }
+        "multiple_faults": sum(fault_active.values()) > 1
     }
 
 @app.get("/api/metrics")
 async def get_metrics():
-    """Detailed metrics for ML model + natural randomness"""
-    global error_count, total_requests, request_times
-    
-    avg_latency = statistics.mean(request_times) if request_times else 0
-    error_rate_pct = (error_count / total_requests * 100) if total_requests > 0 else 0
-    
-    # Add natural randomness to metrics
-    noisy_cpu = get_noisy_cpu()
-    noisy_memory = get_noisy_memory()
+    """PGM-ready metrics"""
+    health_data = await health()
+    m = health_data["metrics"]
     
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": health_data["timestamp"],
         "faults_active": fault_active,
         "observable_nodes": {
-            "cpu_usage": _categorize_cpu(noisy_cpu),
-            "ram_usage": _categorize_ram(noisy_memory),
-            "api_latency": _categorize_latency(avg_latency + random.uniform(-20, 20)),  # Small variation
-            "error_rate": _categorize_errors(error_rate_pct)
-        },
-        "raw_values": {
-            "cpu_percent": round(noisy_cpu, 2),
-            "memory_percent": round(noisy_memory, 2),
-            "avg_latency_ms": round(avg_latency, 2),
-            "error_rate_percent": round(error_rate_pct, 2)
-        },
-        "natural_noise_applied": {
-            "cpu_noise": round(noisy_cpu - psutil.cpu_percent(interval=0.1), 2),
-            "memory_noise": round(noisy_memory - psutil.virtual_memory().percent, 2)
+            "cpu_usage": "Critical" if m["cpu_percent"] > 50 else "High" if m["cpu_percent"] > 20 else "Normal",
+            "ram_usage": "Critical" if m["memory_percent"] > 70 else "High" if m["memory_percent"] > 40 else "Normal",
+            "api_latency": "Timeout" if m["avg_latency_ms"] > 1000 else "Elevated" if m["avg_latency_ms"] > 200 else "Normal",
+            "error_rate": "Spiking" if m["error_rate_percent"] > 5 else "Zero"
         }
     }
 
-def _categorize_cpu(cpu_percent):
-    """Convert CPU to discrete states with fuzzy boundaries"""
-    # False positive: Normal ko High dikhana
-    if cpu_percent < 30:
-        if random.random() < NaturalNoise.FALSE_POSITIVE_RATE and not fault_active["cpu_spike"]:
-            return "High"  # False positive
-        return "Normal"
-    
-    # False negative: High ko Normal dikhana
-    elif cpu_percent < 70:
-        if random.random() < NaturalNoise.FALSE_NEGATIVE_RATE and fault_active["cpu_spike"]:
-            return "Normal"  # False negative
-        return "High"
-    
-    # Critical zone - kam chances of misclassification
-    else:
-        # 2% chance of false negative in critical zone
-        if random.random() < 0.02 and fault_active["cpu_spike"]:
-            return "High"
-        return "Critical"
+# ============= MANUAL FAULT CONTROL =============
+@app.post("/fault/cpu/{action}")
+async def cpu_control(action: str):
+    global fault_tasks
+    if action == "start":
+        fault_active["cpu_spike"] = True
+        if "cpu_spike" in fault_tasks:
+            fault_tasks["cpu_spike"].cancel()
+        fault_tasks["cpu_spike"] = asyncio.create_task(cpu_hog())
+        return {"message": "🔥 CPU spike STARTED - CPU will go to 80-95%"}
+    fault_active["cpu_spike"] = False
+    if "cpu_spike" in fault_tasks:
+        fault_tasks["cpu_spike"].cancel()
+        del fault_tasks["cpu_spike"]
+    return {"message": "✅ CPU spike STOPPED"}
 
-def _categorize_ram(ram_percent):
-    """Convert RAM to discrete states with fuzzy boundaries"""
-    if ram_percent < 40:
-        if random.random() < NaturalNoise.FALSE_POSITIVE_RATE and not fault_active["memory_leak"]:
-            return "High"
-        return "Normal"
-    elif ram_percent < 70:
-        if random.random() < NaturalNoise.FALSE_NEGATIVE_RATE and fault_active["memory_leak"]:
-            return "Normal"
-        return "High"
-    else:
-        return "Critical"
+@app.post("/fault/memory/{action}")
+async def memory_control(action: str):
+    global memory_leak_data, fault_tasks
+    if action == "start":
+        fault_active["memory_leak"] = True
+        if "memory_leak" in fault_tasks:
+            fault_tasks["memory_leak"].cancel()
+        fault_tasks["memory_leak"] = asyncio.create_task(memory_hog())
+        return {"message": "🧠 Memory leak STARTED - RAM will increase"}
+    fault_active["memory_leak"] = False
+    if "memory_leak" in fault_tasks:
+        fault_tasks["memory_leak"].cancel()
+        del fault_tasks["memory_leak"]
+    memory_leak_data.clear()
+    return {"message": "✅ Memory leak STOPPED"}
 
-def _categorize_latency(latency_ms):
-    """Convert latency to discrete states with fuzzy boundaries"""
-    if latency_ms < 100:
-        if random.random() < NaturalNoise.FALSE_POSITIVE_RATE and not fault_active["api_latency"]:
-            return "Elevated"
-        return "Normal"
-    elif latency_ms < 500:
-        if random.random() < NaturalNoise.FALSE_NEGATIVE_RATE and fault_active["api_latency"]:
-            return "Normal"
-        return "Elevated"
-    else:
-        return "Timeout"
+@app.post("/fault/latency/{action}")
+async def latency_control(action: str):
+    fault_active["api_latency"] = (action == "start")
+    return {"message": f"🐌 Latency {action}ed - {'3-8s delay' if action=='start' else 'normal'}"}
 
-def _categorize_errors(error_pct):
-    """Convert error rate to discrete states with fuzzy boundaries"""
-    is_spiking = error_pct > 5
-    
-    if is_spiking:
-        # 5% chance of false negative (spiking ko Zero dikhana)
-        if random.random() < 0.05 and fault_active["error_rate"]:
-            return "Zero"
-        return "Spiking"
-    else:
-        # 5% chance of false positive (Zero ko Spiking dikhana)
-        if random.random() < 0.05 and not fault_active["error_rate"]:
-            return "Spiking"
-        return "Zero"
+@app.post("/fault/errors/{action}")
+async def errors_control(action: str):
+    fault_active["error_rate"] = (action == "start")
+    return {"message": f"💥 Error rate {action}ed - {'30% failures' if action=='start' else 'normal'}"}
+
+@app.get("/")
+async def root():
+    return {
+        "server": "Victim Server",
+        "status": "running",
+        "version": "9.0.0",
+        "faults_active": fault_active,
+        "memory_leak_mb": len(memory_leak_data) * 50
+    }
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000)
