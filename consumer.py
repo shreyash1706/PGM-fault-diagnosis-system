@@ -1,5 +1,6 @@
 import json 
 from confluent_kafka import Consumer,KafkaError,KafkaException
+import requests
 
 KAFKA_TOPIC = "telemetry_stream"
 conf = {
@@ -9,7 +10,9 @@ conf = {
         }
 
 consumer = Consumer(conf)
-consumer.subscribe([KAFKA_TOPIC])
+consumer.subscribe(["telemetry_stream"])
+
+API_URL = "http://127.0.0.0.1:8000/diagnose"
 
 print("Starting Telemetry Consumer... Waiting for data... (Press Ctrl+C to stop)")
 
@@ -30,10 +33,22 @@ try:
 
         telemetry = json.loads(raw_data)
 
-        print(f"\n[RECEIVED] State: {telemetry['true_fault_label']}")
-        print(f"  --> CPU: {telemetry['cpu_state']}")
-        print(f"  --> RAM: {telemetry['ram_state']}")
-        print(f"  --> LAT: {telemetry['latency_state']}")
+        try:
+            response = requests.post(API_URL, json=telemetry)
+            response.raise_for_status() # Raises an error for bad HTTP codes
+            
+            diagnosis = response.json().get('diagnoses', {})
+            
+            # 4. Filter out the 0s to only show the actual faults
+            active_faults = {k: v for k, v in diagnosis.items() if v == 1}
+            
+            if active_faults:
+                print(f"🚨 FAULT DETECTED: {active_faults} 🚨")
+            else:
+                print("✅ System Healthy")
+                
+        except requests.exceptions.RequestException as e:
+            print(f"API Connection Error: Is FastAPI running? ({e})")
 
 except KeyboardInterrupt:
     print("\nShutting down consumer...")
