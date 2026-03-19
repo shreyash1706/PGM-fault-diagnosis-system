@@ -12,7 +12,7 @@ conf = {
 consumer = Consumer(conf)
 consumer.subscribe(["telemetry_stream"])
 
-API_URL = "http://127.0.0.0.1:8000/diagnose"
+API_URL = "http://127.0.0.1:8000/diagnose"
 
 print("Starting Telemetry Consumer... Waiting for data... (Press Ctrl+C to stop)")
 

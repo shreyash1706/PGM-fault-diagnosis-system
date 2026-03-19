@@ -37,7 +37,7 @@ async def diagnose_server(data: TelemetryData):
         return {
             "status": "success",
             "input_evidence": data.model_dump(),
-            "diagnosis": result
+            "diagnoses": result
 
         }
         
