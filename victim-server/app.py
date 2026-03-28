@@ -13,6 +13,7 @@ Features:
 """
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 import redis.asyncio as redis
 import psutil
 import time
@@ -259,11 +260,8 @@ async def lifespan(app: FastAPI):
     
     # ----- Startup -----
     try:
-        redis_client = await redis.from_url(
-            "redis://redis:6379",
-            decode_responses=True
-        )
-        await redis_client.ping()
+        redis_client = await redis.from_url("redis://redis:6379", decode_responses=True)
+        await redis_client.ping()  # type: ignore
         await redis_client.set("products", '{"laptop": 999, "mouse": 25}')
         logger.info("Connected to Redis")
     except Exception as e:
@@ -396,8 +394,8 @@ async def health():
     """
     global error_count, total_requests, request_times, memory_leak_data
     
-    # Get system metrics
-    cpu = psutil.cpu_percent(interval=2.0)  # 2-second interval for accuracy
+    # Get REAL system metrics with interval=None for non-blocking accurate async reading
+    cpu = psutil.cpu_percent(interval=None)
     mem = psutil.virtual_memory().percent
     avg_lat = statistics.mean(request_times) if request_times else 0
     err_rate = (error_count / total_requests * 100) if total_requests > 0 else 0
@@ -442,19 +440,40 @@ async def get_metrics():
         "faults_active": fault_active,
         "auto_fault_enabled": auto_fault_enabled,
         "observable_nodes": {
-            "cpu_usage": "Critical" if m["cpu_percent"] > 50 
-                        else "High" if m["cpu_percent"] > 20 
-                        else "Normal",
-            "ram_usage": "Critical" if m["memory_percent"] > 70 
-                        else "High" if m["memory_percent"] > 40 
-                        else "Normal",
-            "api_latency": "Timeout" if m["avg_latency_ms"] > 1000 
-                          else "Elevated" if m["avg_latency_ms"] > 200 
-                          else "Normal",
+            "cpu_usage": "Critical" if m["cpu_percent"] >= 30 else "High" if m["cpu_percent"] >= 10 else "Normal",
+            "ram_usage": "Critical" if m["memory_percent"] >= 70 else "High" if m["memory_percent"] >= 20 else "Normal",
+            "api_latency": "Timeout" if m["avg_latency_ms"] > 1000 else "Elevated" if m["avg_latency_ms"] > 200 else "Normal",
             "error_rate": "Spiking" if m["error_rate_percent"] > 5 else "Zero"
         }
     }
 
+@app.get("/metrics", response_class=PlainTextResponse)
+async def get_prometheus_format():
+    """Endpoint scraped strictly by Prometheus."""
+    health_data = await health()
+    m = health_data["metrics"]
+    
+    lines = [
+        "# HELP victim_cpu_percent CPU utilization.",
+        "# TYPE victim_cpu_percent gauge",
+        f'victim_cpu_percent {m["cpu_percent"]}',
+        "# HELP victim_memory_percent Memory utilization.",
+        "# TYPE victim_memory_percent gauge",
+        f'victim_memory_percent {m["memory_percent"]}',
+        "# HELP victim_avg_latency_ms Average API Latency in ms.",
+        "# TYPE victim_avg_latency_ms gauge",
+        f'victim_avg_latency_ms {m["avg_latency_ms"]}',
+        "# HELP victim_error_rate_percent Percentage of HTTP errors.",
+        "# TYPE victim_error_rate_percent gauge",
+        f'victim_error_rate_percent {m["error_rate_percent"]}',
+        "# HELP victim_total_requests Total requests served.",
+        "# TYPE victim_total_requests counter",
+        f'victim_total_requests {m["total_requests"]}',
+        "# HELP victim_memory_leak_mb Memory leaked so far.",
+        "# TYPE victim_memory_leak_mb gauge",
+        f'victim_memory_leak_mb {m["memory_leak_mb"]}',
+    ]
+    return "\n".join(lines) + "\n"
 
 @app.get("/api/debug")
 async def debug():
@@ -539,7 +558,6 @@ async def get_auto_fault_status():
 # ============================================================================
 # MANUAL FAULT CONTROL ENDPOINTS
 # ============================================================================
-
 @app.post("/fault/cpu/{action}")
 async def cpu_control(action: str):
     """Manually control CPU spike fault"""
