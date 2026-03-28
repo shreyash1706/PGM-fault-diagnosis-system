@@ -12,7 +12,7 @@ conf = {
 consumer = Consumer(conf)
 consumer.subscribe(["telemetry_stream"])
 
-API_URL = "http://127.0.0.1:8000/diagnose"
+API_URL = "http://127.0.0.1:8001/diagnose"
 
 print("Starting Telemetry Consumer... Waiting for data... (Press Ctrl+C to stop)")
 
@@ -33,8 +33,11 @@ try:
 
         telemetry = json.loads(raw_data)
 
+        # bridge.py nests the actual evidence inside "observable_nodes"
+        evidence_payload = telemetry.get("observable_nodes", telemetry)
+
         try:
-            response = requests.post(API_URL, json=telemetry)
+            response = requests.post(API_URL, json=evidence_payload)
             response.raise_for_status() # Raises an error for bad HTTP codes
             
             diagnosis = response.json().get('diagnoses', {})
