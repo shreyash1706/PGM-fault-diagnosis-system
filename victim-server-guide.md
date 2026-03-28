@@ -87,6 +87,9 @@ curl -X POST http://localhost:8000/auto-fault/stop
 
 # ENABLE AUTO-FAULTS (Let the server manage fault cycles)
 curl -X POST http://localhost:8000/auto-fault/start
+
+# Verify auto-faults are enabled
+curl http://localhost:8000/auto-fault/status
 ```
 
 **Why manage this?**
@@ -104,6 +107,12 @@ You can manually trigger specific failure modes to observe how the monitoring an
 # Start CPU spike
 curl -X POST http://localhost:8000/fault/cpu/start
 
+# Check current status (should show CPU spike active)
+curl http://localhost:8000/health | grep faults_active
+
+# Wait 10 seconds, then check CPU
+curl http://localhost:8000/health | grep cpu_percent
+
 # Stop CPU spike
 curl -X POST http://localhost:8000/fault/cpu/stop
 ```
@@ -114,6 +123,13 @@ curl -X POST http://localhost:8000/fault/cpu/stop
 # Start memory leak
 curl -X POST http://localhost:8000/fault/memory/start
 
+# Watch memory grow (run multiple times)
+curl http://localhost:8000/health | grep memory_leak_mb
+sleep 3
+curl http://localhost:8000/health | grep memory_leak_mb
+sleep 3
+curl http://localhost:8000/health | grep memory_leak_mb
+
 # Stop memory leak
 curl -X POST http://localhost:8000/fault/memory/stop
 ```
@@ -121,8 +137,14 @@ curl -X POST http://localhost:8000/fault/memory/stop
 
 #### 3. API LATENCY
 ```bash
+# Test normal response time
+time curl -s http://localhost:8000/api/products > /dev/null
+
 # Start latency fault
 curl -X POST http://localhost:8000/fault/latency/start
+
+# Test slow response time (3-8 seconds)
+time curl -s http://localhost:8000/api/products > /dev/null
 
 # Stop latency fault
 curl -X POST http://localhost:8000/fault/latency/stop
@@ -133,6 +155,12 @@ curl -X POST http://localhost:8000/fault/latency/stop
 ```bash
 # Start error rate fault
 curl -X POST http://localhost:8000/fault/errors/start
+
+# Watch errors happen (30% will fail)
+for i in {1..10}; do
+    echo -n "Request $i: "
+    curl -s http://localhost:8000/api/products | grep -o "products\|error" || echo "ERROR"
+done
 
 # Stop error rate fault
 curl -X POST http://localhost:8000/fault/errors/stop
