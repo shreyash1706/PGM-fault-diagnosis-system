@@ -97,6 +97,32 @@ curl http://localhost:8000/auto-fault/status
 
 ---
 
+# ENABLE SINGLE FAULT MODE (PGM Training)
+curl -X POST http://localhost:8000/single-fault-mode/enable
+
+# CHECK SINGLE FAULT MODE STATUS
+curl http://localhost:8000/single-fault-mode/status
+
+# Expected response:
+# {
+#   "single_fault_mode": true,
+#   "current_fault": null,
+#   "buffer_active": false,
+#   "configuration": {
+#     "fault_duration": "30.0 seconds",
+#     "buffer_range": "15.0-45.0 seconds",
+#     "health_probability": "70.0%",
+#     "fault_probability": "30.0%"
+#   }
+# }
+
+# WATCH AUTO FAULTS IN ACTION
+# (Run monitor in another terminal)
+python monitor.py
+
+# DISABLE SINGLE FAULT MODE (Return to original)
+curl -X POST http://localhost:8000/single-fault-mode/disable
+
 ## 📋 Phase 5: Manual Fault Injection Testing
 
 ### Step 5: Test Each Fault Type Individually
