@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pandas
+numpy
+pgmpy
+scikit-learn
+scipy
+pydantic
+requests
+confluent-kafka
+psutil

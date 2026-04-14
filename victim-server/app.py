@@ -10,9 +10,11 @@ Features:
 - Natural noise and false positives
 - PGM-ready metrics (discrete states)
 - Auto-fault system can be disabled/enabled via API
+- NEW: Single fault mode with buffer period for PGM training
 """
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 import redis.asyncio as redis
 import psutil
 import time
@@ -46,6 +48,9 @@ fault_active: Dict[str, bool] = {
 
 # Auto-fault system enabled/disabled
 auto_fault_enabled: bool = True
+
+# NEW: Single fault mode with buffer (for PGM training)
+single_fault_mode: bool = False  # Toggle for single-fault-with-buffer mode
 
 # Memory leak storage - grows when memory leak fault is active
 memory_leak_data: List[bytearray] = []
@@ -81,6 +86,12 @@ class Config:
     CPU_NOISE_RANGE: tuple = (2, 8)   # 2-8% extra CPU when noise occurs
     LATENCY_NOISE_PROB: float = 0.15  # 15% chance of random latency
     LATENCY_NOISE_RANGE: tuple = (0.1, 0.4)  # 0.1-0.4s delay when noise occurs
+    
+    # NEW: PGM training mode configuration
+    PGM_FAULT_DURATION: float = 30.0  # Fixed 30 second fault duration
+    PGM_HEALTH_PROBABILITY: float = 0.7  # 70% chance to stay healthy
+    PGM_BUFFER_MIN: float = 15.0  # Minimum buffer between faults (seconds)
+    PGM_BUFFER_MAX: float = 45.0  # Maximum buffer between faults (seconds)
 
 
 # Track when each fault will automatically stop
@@ -88,6 +99,10 @@ fault_end_times: Dict[str, float] = {}
 
 # Track background tasks for each fault
 fault_tasks: Dict[str, asyncio.Task] = {}
+
+# NEW: Track if buffer period is active (no faults during this time)
+buffer_active: bool = False
+buffer_end_time: float = 0
 
 
 # ============================================================================
@@ -165,6 +180,91 @@ async def memory_hog():
     logger.warning("MEMORY HOG STOPPED")
 
 
+async def pgm_fault_scheduler():
+    """
+    NEW: PGM-specific fault scheduler for training data collection.
+    
+    This implements:
+    1. Single fault at a time (no multiple simultaneous faults)
+    2. Faults last exactly 30 seconds
+    3. Buffer period between faults (15-45 seconds)
+    4. Exploration/Exploitation: 70% chance to stay healthy, 30% chance to trigger fault
+    5. Random timing (not fixed intervals) - faults occur at irregular intervals
+    """
+    global fault_active, fault_end_times, fault_tasks, buffer_active, buffer_end_time, memory_leak_data
+    
+    fault_list = ["cpu_spike", "memory_leak", "api_latency", "error_rate"]
+    
+    while True:
+        try:
+            current_time = time.time()
+            
+            # Check if any fault is currently active
+            active_faults = [f for f, v in fault_active.items() if v]
+            
+            # If a fault is active, check if it's time to stop it
+            if active_faults:
+                fault_name = active_faults[0]  # Only one fault should be active
+                if current_time >= fault_end_times.get(fault_name, 0):
+                    # Stop the fault
+                    fault_active[fault_name] = False
+                    logger.info(f"PGM FAULT ENDED: {fault_name} (lasted 30 seconds)")
+                    
+                    # Cancel background task if it exists
+                    if fault_name in fault_tasks:
+                        fault_tasks[fault_name].cancel()
+                        del fault_tasks[fault_name]
+                    
+                    # Clear memory leak data
+                    if fault_name == "memory_leak":
+                        memory_leak_data.clear()
+                    
+                    # Start buffer period (no faults)
+                    buffer_duration = random.uniform(Config.PGM_BUFFER_MIN, Config.PGM_BUFFER_MAX)
+                    buffer_end_time = current_time + buffer_duration
+                    buffer_active = True
+                    logger.info(f"BUFFER PERIOD STARTED: {buffer_duration:.1f}s (no faults during this time)")
+                    
+                    # Remove from end times
+                    if fault_name in fault_end_times:
+                        del fault_end_times[fault_name]
+            
+            # If in buffer period, check if it's over
+            elif buffer_active:
+                if current_time >= buffer_end_time:
+                    buffer_active = False
+                    logger.info("BUFFER PERIOD ENDED - Ready for next fault")
+            
+            # If no fault active and not in buffer period, decide whether to trigger a fault
+            elif not buffer_active and not any(fault_active.values()):
+                # Exploration vs Exploitation: 70% chance to stay healthy, 30% to trigger fault
+                if random.random() < Config.PGM_HEALTH_PROBABILITY:
+                    # Stay healthy (no fault)
+                    logger.debug("PGM: Staying healthy (70% chance)")
+                else:
+                    # Trigger a random fault (30% chance)
+                    fault_name = random.choice(fault_list)
+                    fault_active[fault_name] = True
+                    fault_end_times[fault_name] = current_time + Config.PGM_FAULT_DURATION
+                    
+                    # Start the appropriate background task
+                    if fault_name == "cpu_spike":
+                        task = asyncio.create_task(cpu_hog())
+                        fault_tasks[fault_name] = task
+                    elif fault_name == "memory_leak":
+                        task = asyncio.create_task(memory_hog())
+                        fault_tasks[fault_name] = task
+                    
+                    logger.warning(f"PGM FAULT TRIGGERED: {fault_name} (will last 30 seconds)")
+            
+            # Sleep for 1 second and check again
+            await asyncio.sleep(1)
+            
+        except Exception as e:
+            logger.error(f"PGM fault scheduler error: {e}")
+            await asyncio.sleep(5)
+
+
 async def auto_fault_manager():
     """
     Automatic fault manager - randomly triggers and stops faults
@@ -173,9 +273,18 @@ async def auto_fault_manager():
     1. Checks for expired faults and stops them
     2. Randomly triggers new faults based on probabilities (if enabled)
     3. Logs multiple fault conditions
+    
+    MODIFIED: Now respects single_fault_mode - if enabled, uses PGM scheduler instead
     """
     global fault_end_times, memory_leak_data, fault_tasks, auto_fault_enabled
     
+    # If single fault mode is enabled, start the PGM scheduler and exit this function
+    if single_fault_mode:
+        logger.info("Single fault mode ENABLED - Using PGM scheduler (30s faults, buffer period, 70/30 split)")
+        asyncio.create_task(pgm_fault_scheduler())
+        return  # Exit - PGM scheduler handles everything
+    
+    # Original auto fault manager logic (for multiple simultaneous faults)
     while True:
         try:
             current_time = time.time()
@@ -259,11 +368,8 @@ async def lifespan(app: FastAPI):
     
     # ----- Startup -----
     try:
-        redis_client = await redis.from_url(
-            "redis://redis:6379",
-            decode_responses=True
-        )
-        await redis_client.ping()
+        redis_client = await redis.from_url("redis://redis:6379", decode_responses=True)
+        await redis_client.ping()  # type: ignore
         await redis_client.set("products", '{"laptop": 999, "mouse": 25}')
         logger.info("Connected to Redis")
     except Exception as e:
@@ -291,7 +397,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Victim Server",
     description="Fault injection system for ML training",
-    version="9.0.0",
+    version="10.0.0",
     lifespan=lifespan
 )
 
@@ -396,8 +502,8 @@ async def health():
     """
     global error_count, total_requests, request_times, memory_leak_data
     
-    # Get system metrics
-    cpu = psutil.cpu_percent(interval=2.0)  # 2-second interval for accuracy
+    # Get REAL system metrics with interval=None for non-blocking accurate async reading
+    cpu = psutil.cpu_percent(interval=None)
     mem = psutil.virtual_memory().percent
     avg_lat = statistics.mean(request_times) if request_times else 0
     err_rate = (error_count / total_requests * 100) if total_requests > 0 else 0
@@ -419,7 +525,9 @@ async def health():
         },
         "faults_active": fault_active,
         "multiple_faults": sum(fault_active.values()) > 1,
-        "auto_fault_enabled": auto_fault_enabled
+        "auto_fault_enabled": auto_fault_enabled,
+        "single_fault_mode": single_fault_mode,  # NEW: Show current mode
+        "buffer_active": buffer_active if single_fault_mode else None  # NEW: Show buffer status
     }
 
 
@@ -441,20 +549,42 @@ async def get_metrics():
         "timestamp": health_data["timestamp"],
         "faults_active": fault_active,
         "auto_fault_enabled": auto_fault_enabled,
+        "single_fault_mode": single_fault_mode,  # NEW
         "observable_nodes": {
-            "cpu_usage": "Critical" if m["cpu_percent"] > 50 
-                        else "High" if m["cpu_percent"] > 20 
-                        else "Normal",
-            "ram_usage": "Critical" if m["memory_percent"] > 70 
-                        else "High" if m["memory_percent"] > 40 
-                        else "Normal",
-            "api_latency": "Timeout" if m["avg_latency_ms"] > 1000 
-                          else "Elevated" if m["avg_latency_ms"] > 200 
-                          else "Normal",
+            "cpu_usage": "Critical" if m["cpu_percent"] >= 30 else "High" if m["cpu_percent"] >= 10 else "Normal",
+            "ram_usage": "Critical" if m["memory_percent"] >= 70 else "High" if m["memory_percent"] >= 20 else "Normal",
+            "api_latency": "Timeout" if m["avg_latency_ms"] > 1000 else "Elevated" if m["avg_latency_ms"] > 200 else "Normal",
             "error_rate": "Spiking" if m["error_rate_percent"] > 5 else "Zero"
         }
     }
 
+@app.get("/metrics", response_class=PlainTextResponse)
+async def get_prometheus_format():
+    """Endpoint scraped strictly by Prometheus."""
+    health_data = await health()
+    m = health_data["metrics"]
+    
+    lines = [
+        "# HELP victim_cpu_percent CPU utilization.",
+        "# TYPE victim_cpu_percent gauge",
+        f'victim_cpu_percent {m["cpu_percent"]}',
+        "# HELP victim_memory_percent Memory utilization.",
+        "# TYPE victim_memory_percent gauge",
+        f'victim_memory_percent {m["memory_percent"]}',
+        "# HELP victim_avg_latency_ms Average API Latency in ms.",
+        "# TYPE victim_avg_latency_ms gauge",
+        f'victim_avg_latency_ms {m["avg_latency_ms"]}',
+        "# HELP victim_error_rate_percent Percentage of HTTP errors.",
+        "# TYPE victim_error_rate_percent gauge",
+        f'victim_error_rate_percent {m["error_rate_percent"]}',
+        "# HELP victim_total_requests Total requests served.",
+        "# TYPE victim_total_requests counter",
+        f'victim_total_requests {m["total_requests"]}',
+        "# HELP victim_memory_leak_mb Memory leaked so far.",
+        "# TYPE victim_memory_leak_mb gauge",
+        f'victim_memory_leak_mb {m["memory_leak_mb"]}',
+    ]
+    return "\n".join(lines) + "\n"
 
 @app.get("/api/debug")
 async def debug():
@@ -465,6 +595,8 @@ async def debug():
     return {
         "faults": fault_active,
         "auto_fault_enabled": auto_fault_enabled,
+        "single_fault_mode": single_fault_mode,  # NEW
+        "buffer_active": buffer_active if single_fault_mode else None,
         "stats": {
             "total_requests": total_requests,
             "error_count": error_count,
@@ -524,8 +656,10 @@ async def get_auto_fault_status():
     """
     return {
         "auto_fault_enabled": auto_fault_enabled,
+        "single_fault_mode": single_fault_mode,  # NEW
         "active_faults": [f for f, v in fault_active.items() if v],
         "multiple_faults": sum(fault_active.values()) > 1,
+        "buffer_active": buffer_active if single_fault_mode else None,
         "probabilities": {
             "cpu": f"{Config.AUTO_CPU_PROB * 100}%",
             "memory": f"{Config.AUTO_MEMORY_PROB * 100}%",
@@ -537,13 +671,146 @@ async def get_auto_fault_status():
 
 
 # ============================================================================
-# MANUAL FAULT CONTROL ENDPOINTS
+# NEW: SINGLE FAULT MODE CONTROL ENDPOINTS (for PGM training)
 # ============================================================================
 
+@app.post("/single-fault-mode/enable")
+async def enable_single_fault_mode():
+    """
+    Enable single fault mode with buffer period for PGM training.
+    
+    Features:
+    - Only ONE fault at a time
+    - Faults last exactly 30 seconds
+    - Buffer period between faults (15-45 seconds, random)
+    - 70% chance to stay healthy, 30% chance to trigger a fault
+    - Random timing (not fixed intervals)
+    """
+    global single_fault_mode, fault_active, fault_tasks, memory_leak_data, buffer_active
+    
+    if single_fault_mode:
+        return {
+            "status": "warning",
+            "message": "Single fault mode is already enabled",
+            "single_fault_mode": single_fault_mode
+        }
+    
+    # Stop all currently active faults
+    for fault in fault_active:
+        fault_active[fault] = False
+    
+    # Cancel all background tasks
+    for task in fault_tasks.values():
+        task.cancel()
+    fault_tasks.clear()
+    
+    # Clear memory leak data
+    memory_leak_data.clear()
+    
+    # Reset buffer
+    buffer_active = False
+    
+    # Enable single fault mode
+    single_fault_mode = True
+    
+    # The PGM scheduler will start automatically in auto_fault_manager
+    
+    logger.warning("SINGLE FAULT MODE ENABLED - PGM training mode active")
+    return {
+        "status": "success",
+        "message": "Single fault mode enabled (PGM training mode)",
+        "single_fault_mode": single_fault_mode,
+        "configuration": {
+            "fault_duration": f"{Config.PGM_FAULT_DURATION} seconds",
+            "buffer_range": f"{Config.PGM_BUFFER_MIN}-{Config.PGM_BUFFER_MAX} seconds",
+            "health_probability": f"{Config.PGM_HEALTH_PROBABILITY * 100}% (stay healthy)",
+            "fault_probability": f"{(1 - Config.PGM_HEALTH_PROBABILITY) * 100}% (trigger fault)",
+            "max_concurrent_faults": 1
+        }
+    }
+
+
+@app.post("/single-fault-mode/disable")
+async def disable_single_fault_mode():
+    """
+    Disable single fault mode and revert to original auto-fault behavior.
+    """
+    global single_fault_mode, fault_active, fault_tasks, memory_leak_data, buffer_active
+    
+    if not single_fault_mode:
+        return {
+            "status": "warning",
+            "message": "Single fault mode is already disabled",
+            "single_fault_mode": single_fault_mode
+        }
+    
+    # Stop all currently active faults
+    for fault in fault_active:
+        fault_active[fault] = False
+    
+    # Cancel all background tasks
+    for task in fault_tasks.values():
+        task.cancel()
+    fault_tasks.clear()
+    
+    # Clear memory leak data
+    memory_leak_data.clear()
+    
+    # Reset buffer
+    buffer_active = False
+    
+    # Disable single fault mode
+    single_fault_mode = False
+    
+    logger.warning("SINGLE FAULT MODE DISABLED - Reverting to original auto-fault behavior")
+    return {
+        "status": "success",
+        "message": "Single fault mode disabled (reverted to original auto-fault behavior)",
+        "single_fault_mode": single_fault_mode,
+        "note": "Auto-fault system is still active with original probabilities"
+    }
+
+
+@app.get("/single-fault-mode/status")
+async def get_single_fault_mode_status():
+    """
+    Get current status of single fault mode.
+    """
+    active_faults = [f for f, v in fault_active.items() if v]
+    
+    return {
+        "single_fault_mode": single_fault_mode,
+        "is_active": single_fault_mode,
+        "current_fault": active_faults[0] if active_faults else None,
+        "buffer_active": buffer_active if single_fault_mode else None,
+        "buffer_remaining_seconds": round(buffer_end_time - time.time(), 1) if buffer_active and single_fault_mode else 0,
+        "configuration": {
+            "fault_duration": f"{Config.PGM_FAULT_DURATION} seconds",
+            "buffer_range": f"{Config.PGM_BUFFER_MIN}-{Config.PGM_BUFFER_MAX} seconds",
+            "health_probability": f"{Config.PGM_HEALTH_PROBABILITY * 100}%",
+            "fault_probability": f"{(1 - Config.PGM_HEALTH_PROBABILITY) * 100}%"
+        } if single_fault_mode else None
+    }
+
+
+# ============================================================================
+# MANUAL FAULT CONTROL ENDPOINTS
+# ============================================================================
 @app.post("/fault/cpu/{action}")
 async def cpu_control(action: str):
     """Manually control CPU spike fault"""
     global fault_tasks
+    
+    # Check if in single fault mode and trying to start a fault
+    if single_fault_mode and action == "start":
+        # Check if any fault is already active
+        if any(fault_active.values()):
+            active_faults = [f for f, v in fault_active.items() if v]
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot start CPU fault. Single fault mode is active and fault '{active_faults[0]}' is already running. Stop it first or disable single fault mode."
+            )
+    
     if action == "start":
         fault_active["cpu_spike"] = True
         if "cpu_spike" in fault_tasks:
@@ -563,6 +830,16 @@ async def cpu_control(action: str):
 async def memory_control(action: str):
     """Manually control memory leak fault"""
     global memory_leak_data, fault_tasks
+    
+    # Check if in single fault mode and trying to start a fault
+    if single_fault_mode and action == "start":
+        if any(fault_active.values()):
+            active_faults = [f for f, v in fault_active.items() if v]
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot start memory fault. Single fault mode is active and fault '{active_faults[0]}' is already running. Stop it first or disable single fault mode."
+            )
+    
     if action == "start":
         fault_active["memory_leak"] = True
         if "memory_leak" in fault_tasks:
@@ -582,6 +859,16 @@ async def memory_control(action: str):
 @app.post("/fault/latency/{action}")
 async def latency_control(action: str):
     """Manually control API latency fault"""
+    
+    # Check if in single fault mode and trying to start a fault
+    if single_fault_mode and action == "start":
+        if any(fault_active.values()):
+            active_faults = [f for f, v in fault_active.items() if v]
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot start latency fault. Single fault mode is active and fault '{active_faults[0]}' is already running. Stop it first or disable single fault mode."
+            )
+    
     if action == "start":
         fault_active["api_latency"] = True
         return {"message": "Latency STARTED - 3-8s delay"}
@@ -594,6 +881,16 @@ async def latency_control(action: str):
 @app.post("/fault/errors/{action}")
 async def errors_control(action: str):
     """Manually control error rate fault"""
+    
+    # Check if in single fault mode and trying to start a fault
+    if single_fault_mode and action == "start":
+        if any(fault_active.values()):
+            active_faults = [f for f, v in fault_active.items() if v]
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot start error fault. Single fault mode is active and fault '{active_faults[0]}' is already running. Stop it first or disable single fault mode."
+            )
+    
     if action == "start":
         fault_active["error_rate"] = True
         return {"message": "Error rate STARTED - 30% failures"}
@@ -608,7 +905,7 @@ async def stop_all_faults():
     """
     Stop ALL faults (both automatic and manual)
     """
-    global fault_active, memory_leak_data, fault_tasks, fault_end_times
+    global fault_active, memory_leak_data, fault_tasks, fault_end_times, buffer_active
     
     # Stop all fault states
     for fault in fault_active:
@@ -624,6 +921,10 @@ async def stop_all_faults():
     
     # Clear fault end times
     fault_end_times.clear()
+    
+    # Reset buffer if in single fault mode
+    if single_fault_mode:
+        buffer_active = False
     
     logger.warning("ALL FAULTS STOPPED (manual and auto)")
     return {
@@ -643,15 +944,22 @@ async def root():
     return {
         "server": "Victim Server",
         "status": "running",
-        "version": "9.0.0",
+        "version": "10.0.0",
         "faults_active": fault_active,
         "auto_fault_enabled": auto_fault_enabled,
+        "single_fault_mode": single_fault_mode,  # NEW
         "memory_leak_mb": len(memory_leak_data) * 50,
         "controls": {
             "auto_fault": {
                 "enable": "POST /auto-fault/start",
                 "disable": "POST /auto-fault/stop",
                 "status": "GET /auto-fault/status"
+            },
+            "single_fault_mode_pgm_training": {  # NEW
+                "enable": "POST /single-fault-mode/enable",
+                "disable": "POST /single-fault-mode/disable",
+                "status": "GET /single-fault-mode/status",
+                "description": "30s faults, buffer period, 70/30 health/fault split"
             },
             "manual_faults": {
                 "cpu": "POST /fault/cpu/{start/stop}",
