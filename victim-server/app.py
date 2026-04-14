@@ -46,7 +46,7 @@ fault_active: Dict[str, bool] = {
 }
 
 # Auto-fault system enabled/disabled
-auto_fault_enabled: bool = True
+auto_fault_enabled: bool = False
 
 # Memory leak storage - grows when memory leak fault is active
 memory_leak_data: List[bytearray] = []
@@ -440,8 +440,8 @@ async def get_metrics():
         "faults_active": fault_active,
         "auto_fault_enabled": auto_fault_enabled,
         "observable_nodes": {
-            "cpu_usage": "Critical" if m["cpu_percent"] >= 30 else "High" if m["cpu_percent"] >= 10 else "Normal",
-            "ram_usage": "Critical" if m["memory_percent"] >= 70 else "High" if m["memory_percent"] >= 20 else "Normal",
+            "cpu_usage": "Critical" if m["cpu_percent"] >= 80 else "High" if m["cpu_percent"] >= 50 else "Normal",
+            "ram_usage": "Critical" if m["memory_percent"] >= 90 else "High" if m["memory_percent"] >= 75 else "Normal",
             "api_latency": "Timeout" if m["avg_latency_ms"] > 1000 else "Elevated" if m["avg_latency_ms"] > 200 else "Normal",
             "error_rate": "Spiking" if m["error_rate_percent"] > 5 else "Zero"
         }
