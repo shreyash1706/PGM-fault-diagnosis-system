@@ -10,6 +10,7 @@ It perfectly demonstrates how distributed infrastructure can automatically detec
 - **`bridge.py`**: A continuous Python loop that pulls raw data from Prometheus, discretizes the continuous metrics (e.g., `90% CPU` -> `"Critical"`), and pushes them to Apache Kafka.
 - **`consumer.py`**: Subscribes to the Kafka `telemetry_stream` topic, isolating the discrete evidence and POSTing it to the Diagnostic API.
 - **`main.py`**: Hosts the `bayesian_fault_model.pkl` probabilistic model using FastAPI to provide a `/diagnose` endpoint.
+- **`evaluator.py`**: A specialized algorithmic benchmarking script that mathematically compares the real-time Bayesian Network predictions against the absolute Ground Truth of the Victim Server.
 
 ---
 
@@ -19,7 +20,7 @@ It perfectly demonstrates how distributed infrastructure can automatically detec
 You will need Docker Desktop and Python 3.10+ installed.
 
 ### Step 1: Start the Infrastructure
-Fire up the backend data components (Prometheus, Zookeeper, Apache Kafka, Redis, and MLFlow) in your initial terminal:
+Fire up the backend data components (Prometheus, Apache Kafka in KRaft Mode, and Redis) in your initial terminal:
 ```bash
 docker compose up -d
 ```
@@ -49,4 +50,17 @@ python consumer.py
 ```
 
 ### 🚨 Forcing a System Failure
-To witness the pipeline reacting in real time, simply wait for the `victim-server/app.py` to auto-trigger a massive fault (like a Memory Hog), or trigger one yourself! As soon as it occurs, watch the `bridge.py` terminal change from `"Normal"` to `"Critical"`, and watch the `consumer.py` terminal output a `🚨 FAULT DETECTED 🚨` alert!
+To witness the pipeline reacting in real time, simply wait for the `victim-server/app.py` to auto-trigger a massive fault (like a Memory Hog), or manually trigger one yourself using the interactive visual dashboard at `http://localhost:8000/docs`! As soon as it occurs, watch the `bridge.py` terminal change from `"Normal"` to `"Critical"`, and watch the `consumer.py` terminal output a `🚨 FAULT DETECTED 🚨` alert!
+
+---
+
+## 📊 Evaluating System Accuracy
+
+We have built a strict Scikit-Learn evaluator to test how perfectly the Bayesian network guesses the root cause during overlapping fault conditions.
+
+1. Ensure the Victim Server (`app.py`) and Diagnostic Server (`main.py`) are running.
+2. In a new terminal, run the benchmark:
+```bash
+python evaluator.py
+```
+3. The script will pull the true labels and the model predictions simultaneously, outputting a high-fidelity **Precision & Recall Accuracy Report** at the end of the loop!

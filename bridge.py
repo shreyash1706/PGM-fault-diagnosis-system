@@ -2,7 +2,7 @@ import time
 import json
 import requests
 import logging
-from kafka import KafkaProducer
+from confluent_kafka import Producer
 
 # ================= Configure Logging =================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -32,13 +32,13 @@ def get_prometheus_metric(query: str, default_value=0.0) -> float:
 # We categorize raw technical metrics into the semantic states expected by
 # the Probabilistic Graphical Model defined in nodes.md
 def discretize_cpu(cpu_percent: float) -> str:
-    if cpu_percent >= 30: return "Critical"
-    if cpu_percent >= 10: return "High"
+    if cpu_percent >= 80: return "Critical"
+    if cpu_percent >= 50: return "High"
     return "Normal"
 
 def discretize_ram(ram_percent: float) -> str:
-    if ram_percent >= 70: return "Critical"
-    if ram_percent >= 20: return "High"
+    if ram_percent >= 90: return "Critical"
+    if ram_percent >= 75: return "High"
     return "Normal"
 
 def discretize_latency(latency_ms: float) -> str:
@@ -78,11 +78,10 @@ def main():
     
     # Standard Kafka producer setup
     try:
-        producer = KafkaProducer(
-            bootstrap_servers=[KAFKA_BROKER],
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            retries=5
-        )
+        producer = Producer({
+            'bootstrap.servers': KAFKA_BROKER,
+            'message.timeout.ms': 5000
+        })
         logger.info("✅ Connected to Kafka")
     except Exception as e:
         logger.warning(f"⚠️ Could not connect to Kafka broker at {KAFKA_BROKER}. Running in dry-run mode. Error: {e}")
@@ -94,7 +93,9 @@ def main():
         
         if producer:
             try:
-                producer.send(KAFKA_TOPIC, payload)
+                payload_bytes = json.dumps(payload).encode('utf-8')
+                producer.produce(KAFKA_TOPIC, value=payload_bytes)
+                producer.poll(0)
                 producer.flush()
                 logger.info(f"📤 Pushed to Kafka: {payload['observable_nodes']}")
             except Exception as e:
