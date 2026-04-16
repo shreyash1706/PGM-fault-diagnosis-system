@@ -568,22 +568,53 @@ async def get_prometheus_format():
         "# HELP victim_cpu_percent CPU utilization.",
         "# TYPE victim_cpu_percent gauge",
         f'victim_cpu_percent {m["cpu_percent"]}',
+        
         "# HELP victim_memory_percent Memory utilization.",
         "# TYPE victim_memory_percent gauge",
         f'victim_memory_percent {m["memory_percent"]}',
+        
         "# HELP victim_avg_latency_ms Average API Latency in ms.",
         "# TYPE victim_avg_latency_ms gauge",
         f'victim_avg_latency_ms {m["avg_latency_ms"]}',
+        
         "# HELP victim_error_rate_percent Percentage of HTTP errors.",
         "# TYPE victim_error_rate_percent gauge",
         f'victim_error_rate_percent {m["error_rate_percent"]}',
+        
         "# HELP victim_total_requests Total requests served.",
         "# TYPE victim_total_requests counter",
         f'victim_total_requests {m["total_requests"]}',
+        
         "# HELP victim_memory_leak_mb Memory leaked so far.",
         "# TYPE victim_memory_leak_mb gauge",
         f'victim_memory_leak_mb {m["memory_leak_mb"]}',
+        
+        # ========== ACTIVE FAULTS (GROUND TRUTH) ==========
+        "# HELP victim_fault_cpu_spike CPU spike fault active (1=active, 0=inactive)",
+        "# TYPE victim_fault_cpu_spike gauge",
+        f'victim_fault_cpu_spike {1 if fault_active["cpu_spike"] else 0}',
+        
+        "# HELP victim_fault_memory_leak Memory leak fault active (1=active, 0=inactive)",
+        "# TYPE victim_fault_memory_leak gauge",
+        f'victim_fault_memory_leak {1 if fault_active["memory_leak"] else 0}',
+        
+        "# HELP victim_fault_api_latency API latency fault active (1=active, 0=inactive)",
+        "# TYPE victim_fault_api_latency gauge",
+        f'victim_fault_api_latency {1 if fault_active["api_latency"] else 0}',
+        
+        "# HELP victim_fault_error_rate Error rate fault active (1=active, 0=inactive)",
+        "# TYPE victim_fault_error_rate gauge",
+        f'victim_fault_error_rate {1 if fault_active["error_rate"] else 0}',
+        
+        "# HELP victim_multiple_faults Multiple faults active (1=yes, 0=no)",
+        "# TYPE victim_multiple_faults gauge",
+        f'victim_multiple_faults {1 if sum(fault_active.values()) > 1 else 0}',
+        
+        "# HELP victim_auto_fault_enabled Auto-fault system status (1=enabled, 0=disabled)",
+        "# TYPE victim_auto_fault_enabled gauge",
+        f'victim_auto_fault_enabled {1 if auto_fault_enabled else 0}',
     ]
+    
     return "\n".join(lines) + "\n"
 
 @app.get("/api/debug")
