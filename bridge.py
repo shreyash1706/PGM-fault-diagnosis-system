@@ -56,7 +56,16 @@ def build_pgm_payload() -> dict:
     ram_percent = get_prometheus_metric("victim_memory_percent")
     latency_ms = get_prometheus_metric("victim_avg_latency_ms")
     error_rate = get_prometheus_metric("victim_error_rate_percent")
-
+    active_fault = ""
+    if get_prometheus_metric("victim_fault_cpu_spike"):
+        active_fault = "CPU_SPIKE"
+    if get_prometheus_metric("victim_fault_memory_leak"):
+        active_fault = "MEMORY_LEAK"
+    if get_prometheus_metric("victim_fault_api_latency"):
+            active_fault = "NEWTORK_PARTITION"
+    if get_prometheus_metric("victim_fault_error_rate"):
+        active_fault = "APP_CRASH"        
+            
     return {
         "timestamp": int(time.time() * 1000),
         "observable_nodes": {
@@ -70,7 +79,8 @@ def build_pgm_payload() -> dict:
             "ram_percent": round(float(ram_percent), 2),
             "latency_ms": round(float(latency_ms), 2),
             "error_rate": round(float(error_rate), 2)
-        }
+        },
+        "active_fault": active_fault
     }
 
 def main():
@@ -97,6 +107,7 @@ def main():
                 producer.produce(KAFKA_TOPIC, value=payload_bytes)
                 producer.poll(0)
                 producer.flush()
+                logger.info(f"active fault: {payload['active_fault']}")
                 logger.info(f"📤 Pushed to Kafka: {payload['observable_nodes']}")
             except Exception as e:
                 logger.error(f"❌ Error publishing to Kafka: {e}")
