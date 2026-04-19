@@ -589,32 +589,30 @@ async def get_prometheus_format():
         "# TYPE victim_memory_leak_mb gauge",
         f'victim_memory_leak_mb {m["memory_leak_mb"]}',
         
-        # ========== ACTIVE FAULTS (GROUND TRUTH) ==========
-        "# HELP victim_fault_cpu_spike CPU spike fault active (1=active, 0=inactive)",
+        "# HELP victim_fault_cpu_spike CPU spike fault active (1=Yes, 0=No).",
         "# TYPE victim_fault_cpu_spike gauge",
         f'victim_fault_cpu_spike {1 if fault_active["cpu_spike"] else 0}',
         
-        "# HELP victim_fault_memory_leak Memory leak fault active (1=active, 0=inactive)",
+        "# HELP victim_fault_memory_leak Memory leak fault active (1=Yes, 0=No).",
         "# TYPE victim_fault_memory_leak gauge",
         f'victim_fault_memory_leak {1 if fault_active["memory_leak"] else 0}',
         
-        "# HELP victim_fault_api_latency API latency fault active (1=active, 0=inactive)",
+        "# HELP victim_fault_api_latency API latency fault active (1=Yes, 0=No).",
         "# TYPE victim_fault_api_latency gauge",
         f'victim_fault_api_latency {1 if fault_active["api_latency"] else 0}',
         
-        "# HELP victim_fault_error_rate Error rate fault active (1=active, 0=inactive)",
+        "# HELP victim_fault_error_rate Error rate fault active (1=Yes, 0=No).",
         "# TYPE victim_fault_error_rate gauge",
         f'victim_fault_error_rate {1 if fault_active["error_rate"] else 0}',
         
-        "# HELP victim_multiple_faults Multiple faults active (1=yes, 0=no)",
+        "# HELP victim_multiple_faults Multiple faults active (1=Yes, 0=No).",
         "# TYPE victim_multiple_faults gauge",
         f'victim_multiple_faults {1 if sum(fault_active.values()) > 1 else 0}',
         
-        "# HELP victim_auto_fault_enabled Auto-fault system status (1=enabled, 0=disabled)",
+        "# HELP victim_auto_fault_enabled Auto-fault system enabled (1=Yes, 0=No).",
         "# TYPE victim_auto_fault_enabled gauge",
         f'victim_auto_fault_enabled {1 if auto_fault_enabled else 0}',
     ]
-    
     return "\n".join(lines) + "\n"
 
 @app.get("/api/debug")
