@@ -33,12 +33,12 @@ def get_prometheus_metric(query: str, default_value=0.0) -> float:
 # the Probabilistic Graphical Model defined in nodes.md
 def discretize_cpu(cpu_percent: float) -> str:
     if cpu_percent >= 80: return "Critical"
-    if cpu_percent >= 50: return "High"
+    if cpu_percent >= 20: return "High"
     return "Normal"
 
 def discretize_ram(ram_percent: float) -> str:
-    if ram_percent >= 90: return "Critical"
-    if ram_percent >= 75: return "High"
+    if ram_percent >= 80: return "Critical"
+    if ram_percent >= 30: return "High"
     return "Normal"
 
 def discretize_latency(latency_ms: float) -> str:
@@ -47,7 +47,7 @@ def discretize_latency(latency_ms: float) -> str:
     return "Normal"
 
 def discretize_error_rate(error_rate: float) -> str:
-    if error_rate > 5: return "Spiking"
+    if error_rate > 0.05: return "Spiking"
     return "Zero"
 
 def build_pgm_payload() -> dict:
