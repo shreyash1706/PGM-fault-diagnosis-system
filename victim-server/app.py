@@ -568,18 +568,23 @@ async def get_prometheus_format():
         "# HELP victim_cpu_percent CPU utilization.",
         "# TYPE victim_cpu_percent gauge",
         f'victim_cpu_percent {m["cpu_percent"]}',
+        
         "# HELP victim_memory_percent Memory utilization.",
         "# TYPE victim_memory_percent gauge",
         f'victim_memory_percent {m["memory_percent"]}',
+        
         "# HELP victim_avg_latency_ms Average API Latency in ms.",
         "# TYPE victim_avg_latency_ms gauge",
         f'victim_avg_latency_ms {m["avg_latency_ms"]}',
+        
         "# HELP victim_error_rate_percent Percentage of HTTP errors.",
         "# TYPE victim_error_rate_percent gauge",
         f'victim_error_rate_percent {m["error_rate_percent"]}',
+        
         "# HELP victim_total_requests Total requests served.",
         "# TYPE victim_total_requests counter",
         f'victim_total_requests {m["total_requests"]}',
+        
         "# HELP victim_memory_leak_mb Memory leaked so far.",
         "# TYPE victim_memory_leak_mb gauge",
         f'victim_memory_leak_mb {m["memory_leak_mb"]}',
