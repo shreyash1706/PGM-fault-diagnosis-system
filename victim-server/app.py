@@ -28,6 +28,8 @@ import socket
 from typing import Dict, List
 import statistics
 import math
+from collections import deque
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -55,9 +57,9 @@ single_fault_mode: bool = False  # Toggle for single-fault-with-buffer mode
 # Memory leak storage - grows when memory leak fault is active
 memory_leak_data: List[bytearray] = []
 
-# Metrics tracking
-request_times: List[float] = []      # Response times for last 100 requests (ms)
-error_count: int = 0                  # Total number of 500 errors
+# Metrics tracking - FIXED: Using sliding window with deques
+request_times = deque(maxlen=100)  # Response times for last 100 requests (ms)
+error_flags = deque(maxlen=100)     # Error flags for last 100 requests (1=error, 0=success)
 total_requests: int = 0               # Total requests processed
 
 # Redis connection
@@ -132,6 +134,20 @@ buffer_end_time: float = 0
 
 
 # ============================================================================
+# CONTAINER CPU METRIC (NEW)
+# ============================================================================
+
+def get_container_cpu():
+    """Get container CPU usage using load average"""
+    try:
+        load = os.getloadavg()[0]
+        cpu_count = os.cpu_count() or 1
+        return (load / cpu_count) * 100
+    except:
+        return 0
+
+
+# ============================================================================
 # BACKGROUND TASKS (Fault Implementation)
 # ============================================================================
 
@@ -145,8 +161,8 @@ async def cpu_hog():
     """
     logger.warning("CPU HOG STARTED - CPU will spike to 80-95%")
     while fault_active["cpu_spike"]:
-        # Heavy computation loop - 5 million iterations
-        for i in range(5_000_000):
+        # FIXED: Increased iterations for stronger CPU spike (20 million)
+        for i in range(20_000_000):
             # Complex math operations that stress CPU
             _ = math.sqrt(i) * math.sin(i) * math.cos(i) ** 3
             _ = math.pow(i, 1.5) * math.log(i + 1)
@@ -409,7 +425,7 @@ app = FastAPI(
 @app.middleware("http")
 async def track_requests(request: Request, call_next):
     """Middleware to track request times and errors"""
-    global total_requests, error_count, request_times
+    global total_requests, request_times, error_flags
     
     total_requests += 1
     start = time.time()
@@ -422,12 +438,15 @@ async def track_requests(request: Request, call_next):
         
         response = await call_next(request)
         process_time = (time.time() - start) * 1000  # Convert to ms
+        
+        # FIXED: Just append to deque (auto handles maxlen)
         request_times.append(process_time)
-        if len(request_times) > 100:
-            request_times.pop(0)
+        error_flags.append(0)  # Success case
+        
         return response
     except Exception:
-        error_count += 1
+        # FIXED: Use flag instead of counter
+        error_flags.append(1)  # Error case
         raise
 
 
@@ -441,7 +460,7 @@ async def get_products():
     Get products endpoint
     Affected by: CPU spike, API latency, Error rate faults
     """
-    global error_count
+    global error_flags
     
     # CPU Spike Fault - heavy computation
     if fault_active["cpu_spike"]:
@@ -457,7 +476,7 @@ async def get_products():
     # Error Rate Fault - random failures
     if fault_active["error_rate"]:
         if random.random() < 0.3:  # 30% failure rate
-            error_count += 1
+            # Note: error tracking is handled by middleware
             raise HTTPException(status_code=500, detail="Random error injected")
     
     return {
@@ -500,23 +519,29 @@ async def health():
     - Docker: Container's CPU relative to allocated cores (1 core = 100%)
     - psutil: Percentage of TOTAL system CPU (4 cores = 100%)
     """
-    global error_count, total_requests, request_times, memory_leak_data
+    global total_requests, request_times, error_flags, memory_leak_data
     
-    # Get REAL system metrics with interval=None for non-blocking accurate async reading
-    cpu = psutil.cpu_percent(interval=None)
+    # FIXED: Force actual measurement with interval=0.5
+    cpu = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory().percent
-    avg_lat = statistics.mean(request_times) if request_times else 0
-    err_rate = (error_count / total_requests * 100) if total_requests > 0 else 0
+    
+    # FIXED: Calculate metrics from sliding windows
+    avg_lat = sum(request_times) / len(request_times) if request_times else 0
+    err_rate = (sum(error_flags) / len(error_flags) * 100) if error_flags else 0
     
     # Natural CPU noise (false positives) - only when fault not active
     if not fault_active["cpu_spike"] and random.random() < 0.15:
         cpu += random.uniform(2, 8)
         cpu = min(cpu, 100)
     
+    # NEW: Get container CPU metric
+    container_cpu = get_container_cpu()
+    
     return {
         "timestamp": datetime.now().isoformat(),
         "metrics": {
             "cpu_percent": round(cpu, 2),
+            "container_cpu_percent": round(container_cpu, 2),  # NEW
             "memory_percent": round(mem, 2),
             "avg_latency_ms": round(avg_lat, 2),
             "error_rate_percent": round(err_rate, 2),
@@ -568,6 +593,10 @@ async def get_prometheus_format():
         "# HELP victim_cpu_percent CPU utilization.",
         "# TYPE victim_cpu_percent gauge",
         f'victim_cpu_percent {m["cpu_percent"]}',
+        
+        "# HELP victim_container_cpu_percent Container CPU usage",  # NEW
+        "# TYPE victim_container_cpu_percent gauge",  # NEW
+        f'victim_container_cpu_percent {m["container_cpu_percent"]}',  # NEW
         
         "# HELP victim_memory_percent Memory utilization.",
         "# TYPE victim_memory_percent gauge",
@@ -628,9 +657,8 @@ async def debug():
         "buffer_active": buffer_active if single_fault_mode else None,
         "stats": {
             "total_requests": total_requests,
-            "error_count": error_count,
-            "error_rate_percent": (error_count / total_requests * 100) if total_requests > 0 else 0,
-            "recent_latencies_ms": request_times[-10:] if request_times else [],
+            "error_flags_recent": list(error_flags)[-10:] if error_flags else [],
+            "request_times_recent": list(request_times)[-10:] if request_times else [],
             "memory_leak_mb": len(memory_leak_data) * 50
         }
     }
