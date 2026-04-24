@@ -96,7 +96,7 @@ curl http://localhost:8000/auto-fault/status
 - When performing manual tests (Phase 5), it is recommended to **Stop** auto-faults first so they don't interfere with your specific test results.
 
 ---
-
+```bash
 # ENABLE SINGLE FAULT MODE (PGM Training)
 curl -X POST http://localhost:8000/single-fault-mode/enable
 
