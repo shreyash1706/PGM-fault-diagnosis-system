@@ -1,240 +1,310 @@
-# 🚀 PGP Victim Server: Complete Operation Guide
+# 🚀 PGM Fault Diagnosis System (Victim Server)
 
-This guide provides a comprehensive walkthrough for managing, monitoring, and testing the **PGM Fault Diagnosis System**. It covers everything from initial container deployment to manual fault injection and multi-fault stress testing.
+A **fault injection + observability system** designed to generate **causal training data** for a **Probabilistic Graphical Model (PGM)**.
 
 ---
 
-## 📋 Phase 1: Environment Orchestration
+# 🧠 System Overview
 
-### Step 1: Build and Start Containers
-Ensure your environment is clean and all services are running based on the latest configurations.
+This system simulates real-world failures where:
+
+> **Faults (latent variables) → Metrics (observable variables)**
+
+Your model learns:
+
+> **P(Fault | Observations)**
+
+---
+
+## 🔹 Latent Nodes (Hidden Faults)
+
+| Fault             | Description                       |
+| ----------------- | --------------------------------- |
+| Compute_Overload  | CPU spike + mild latency          |
+| Memory_Leak       | RAM exhaustion + moderate latency |
+| Network_Partition | High latency (timeouts)           |
+| App_Crash         | Random HTTP errors                |
+
+---
+
+## 🔹 Observable Nodes (PGM Inputs)
+
+| Metric      | States                      |
+| ----------- | --------------------------- |
+| CPU_Usage   | Normal / High / Critical    |
+| RAM_Usage   | Normal / High / Critical    |
+| API_Latency | Normal / Elevated / Timeout |
+| Error_Rate  | Zero / Spiking              |
+
+---
+
+## 🔗 Causal Mapping
+
+| Fault             | Effects           |
+| ----------------- | ----------------- |
+| Compute_Overload  | CPU ↑ + Latency ↑ |
+| Memory_Leak       | RAM ↑ + Latency ↑ |
+| Network_Partition | Latency ↑↑        |
+| App_Crash         | Errors ↑          |
+
+---
+
+# 🚀 Quick Start
+
+## 1️⃣ Start the system
 
 ```bash
-# Navigate to your project folder
-cd D:\PGP
-
-# Stop any existing containers (clean start)
-docker-compose down
-
-# Build and start all services in detached mode
+docker-compose down -v
 docker-compose up -d --build
-
-# Check if containers are running
 docker-compose ps
 ```
 
-**What these commands do:**
-- `docker-compose down`: Stops and removes containers, networks, and images defined in the compose file. This ensures you start from a clean state.
-- `docker-compose up -d --build`: 
-    - `-d`: Runs containers in the background (**detached mode**).
-    - `--build`: Forces a rebuild of images even if they already exist, ensuring your latest code changes are included.
-- `docker-compose ps`: Lists the status of your containers to verify services are `Up (healthy)`.
-
 ---
 
-## 📋 Phase 2: Core Connectivity Verification
-
-### Step 2: Check Basic Endpoints
-Before running any tests, verify that the server is responding correctly.
+## 2️⃣ Verify services
 
 ```bash
-# Check root endpoint
-curl http://localhost:8000/
-
-# Check health endpoint
 curl http://localhost:8000/health
-
-# Check auto-fault status (should be enabled by default)
-curl http://localhost:8000/auto-fault/status
 ```
-
-**What these commands do:**
-- `/`: Confirms the web server is alive and reachable.
-- `/health`: Provides real-time metrics for the server. This is the primary endpoint used for monitoring.
-- `/auto-fault/status`: Queries the internal scheduler to see if the system will automatically generate faults for testing.
 
 ---
 
-## 📋 Phase 3: Real-Time Monitoring
+## 3️⃣ Open dashboards
 
-### Step 3: Run the Visual Monitor
-Open a **new terminal** window and run the monitoring script to watch the system's behavior in real-time.
-
-```bash
-cd D:\PGP
-python monitor.py
-```
-
-**What this script does:**
-- Continuously polls the `/health` endpoint.
-- Displays a visual dashboard showing **CPU Usage**, **Memory Usage**, **Latency**, and **Error Rates**.
-- Highlights active faults and displays notifications for multiple fault detection.
-- Useful for visually confirming that your manual triggers are working as expected.
+| Service       | URL                        |
+| ------------- | -------------------------- |
+| API Docs      | http://localhost:8000/docs |
+| Prometheus    | http://localhost:9090      |
+| Grafana       | http://localhost:3000      |
+| Kafka UI      | http://localhost:8080      |
+| MLflow        | http://localhost:5000      |
+| Redis Insight | http://localhost:5540      |
 
 ---
 
-## 📋 Phase 4: Auto-Fault System Control
-
-### Step 4: Manage Scheduled Faults
-The system has an "Auto-Fault" mode where it randomly injects problems. You can control this for testing stability.
-
-```bash
-# CHECK AUTO-FAULT STATUS
-curl http://localhost:8000/auto-fault/status
-
-# DISABLE AUTO-FAULTS (Switch to manual testing only)
-curl -X POST http://localhost:8000/auto-fault/stop
-
-# ENABLE AUTO-FAULTS (Let the server manage fault cycles)
-curl -X POST http://localhost:8000/auto-fault/start
-
-# Verify auto-faults are enabled
-curl http://localhost:8000/auto-fault/status
-```
-
-**Why manage this?**
-- When performing manual tests (Phase 5), it is recommended to **Stop** auto-faults first so they don't interfere with your specific test results.
+# 🎮 Modes
 
 ---
+
+## 🔹 PGM Mode (IMPORTANT)
+
 ```bash
-# ENABLE SINGLE FAULT MODE (PGM Training)
 curl -X POST http://localhost:8000/single-fault-mode/enable
+```
 
-# CHECK SINGLE FAULT MODE STATUS
-curl http://localhost:8000/single-fault-mode/status
+### Behavior:
 
-# Expected response:
-# {
-#   "single_fault_mode": true,
-#   "current_fault": null,
-#   "buffer_active": false,
-#   "configuration": {
-#     "fault_duration": "30.0 seconds",
-#     "buffer_range": "15.0-45.0 seconds",
-#     "health_probability": "70.0%",
-#     "fault_probability": "30.0%"
-#   }
-# }
+* One fault at a time
+* Clean causal data
+* RL-style cycle:
 
-# WATCH AUTO FAULTS IN ACTION
-# (Run monitor in another terminal)
-python monitor.py
+```
+Healthy → Decision → Fault → Buffer → Repeat
+```
 
-# DISABLE SINGLE FAULT MODE (Return to original)
-curl -X POST http://localhost:8000/single-fault-mode/disable
+---
 
-## 📋 Phase 5: Manual Fault Injection Testing
+## 🔹 Disable PGM Mode
 
-### Step 5: Test Each Fault Type Individually
-You can manually trigger specific failure modes to observe how the monitoring and PGM system reacts.
-
-#### 1. CPU SPIKE
 ```bash
-# Start CPU spike
+curl -X POST http://localhost:8000/single-fault-mode/disable
+```
+
+---
+
+## 🔹 Auto Fault Control
+
+```bash
+curl -X POST http://localhost:8000/auto-fault/start
+curl -X POST http://localhost:8000/auto-fault/stop
+```
+
+---
+
+# 🔧 Manual Fault Control
+
+---
+
+## Compute_Overload
+
+```bash
 curl -X POST http://localhost:8000/fault/cpu/start
-
-# Check current status (should show CPU spike active)
-curl http://localhost:8000/health | grep faults_active
-
-# Wait 10 seconds, then check CPU
-curl http://localhost:8000/health | grep cpu_percent
-
-# Stop CPU spike
 curl -X POST http://localhost:8000/fault/cpu/stop
 ```
-- **Effect**: Spawns multiple threads to perform heavy mathematical calculations, pushing CPU usage toward 100%.
-
-#### 2. MEMORY LEAK
-```bash
-# Start memory leak
-curl -X POST http://localhost:8000/fault/memory/start
-
-# Watch memory grow (run multiple times)
-curl http://localhost:8000/health | grep memory_leak_mb
-sleep 3
-curl http://localhost:8000/health | grep memory_leak_mb
-sleep 3
-curl http://localhost:8000/health | grep memory_leak_mb
-
-# Stop memory leak
-curl -X POST http://localhost:8000/fault/memory/stop
-```
-- **Effect**: Continuously allocates memory in a background list. Use `curl http://localhost:8000/health | grep memory_leak_mb` to watch the leak grow.
-
-#### 3. API LATENCY
-```bash
-# Test normal response time
-time curl -s http://localhost:8000/api/products > /dev/null
-
-# Start latency fault
-curl -X POST http://localhost:8000/fault/latency/start
-
-# Test slow response time (3-8 seconds)
-time curl -s http://localhost:8000/api/products > /dev/null
-
-# Stop latency fault
-curl -X POST http://localhost:8000/fault/latency/stop
-```
-- **Effect**: Introduces a random sleep (3-8 seconds) into API calls like `/api/products`. Expect request times to spike significantly.
-
-#### 4. ERROR RATE
-```bash
-# Start error rate fault
-curl -X POST http://localhost:8000/fault/errors/start
-
-# Watch errors happen (30% will fail)
-for i in {1..10}; do
-    echo -n "Request $i: "
-    curl -s http://localhost:8000/api/products | grep -o "products\|error" || echo "ERROR"
-done
-
-# Stop error rate fault
-curl -X POST http://localhost:8000/fault/errors/stop
-```
-- **Effect**: Forces roughly 30% of API requests to fail with a `500 Internal Server Error`.
 
 ---
 
-## 📋 Phase 6: Multi-Fault Stress Testing
-
-### Step 6: Test Combined Failure Scenarios
-In real-world environments, faults rarely happen in isolation. Test how the system handles multiple simultaneous issues.
+## Memory_Leak
 
 ```bash
-# START ALL FAULTS SIMULTANEOUSLY
-curl -X POST http://localhost:8000/fault/cpu/start
 curl -X POST http://localhost:8000/fault/memory/start
+curl -X POST http://localhost:8000/fault/memory/stop
+```
+
+---
+
+## Network_Partition
+
+```bash
 curl -X POST http://localhost:8000/fault/latency/start
+curl -X POST http://localhost:8000/fault/latency/stop
+```
+
+---
+
+## App_Crash
+
+```bash
 curl -X POST http://localhost:8000/fault/errors/start
+curl -X POST http://localhost:8000/fault/errors/stop
+```
 
-# VERIFY STATUS (Should list all 4 active faults)
-curl http://localhost:8000/health | grep faults_active
+---
 
-# STOP ALL FAULTS (Emergency Stop for all injected issues)
+## Stop All Faults
+
+```bash
 curl -X POST http://localhost:8000/fault/stop-all
 ```
 
-**Why test this?**
-- Confirms the monitor's ability to handle overlapping telemetry signals.
-- Validates the "Stop All" fail-safe mechanism.
+---
+
+# 📊 Metrics
 
 ---
 
-## 📋 Phase 7: Advanced Data Inspection
-
-### Step 7: Examine Metrics for ML & Debugging
-These endpoints provide the raw data used by the PGM model and for developer debugging.
+## 🔹 Raw Metrics
 
 ```bash
-# HEALTH ENDPOINT: Real-time system state
-curl http://localhost:8000/health | python -m json.tool
-
-# PGM METRICS: Structured data optimized for the Probabilistic Graphical Model
-curl http://localhost:8000/api/metrics | python -m json.tool
-
-# DEBUG ENDPOINT: Internal scheduler and detailed fault state
-curl http://localhost:8000/api/debug | python -m json.tool
+curl http://localhost:8000/health
 ```
 
-**Command Note:**
-- `| python -m json.tool`: Piped into Python to "pretty-print" the JSON response, making it easier to read in the terminal.
+Includes:
+
+* container_cpu_percent ✅
+* memory_percent
+* avg_latency_ms
+* error_rate_percent
+
+---
+
+## 🔹 PGM Metrics (MAIN)
+
+```bash
+curl http://localhost:8000/api/metrics
+```
+
+Example:
+
+```json
+{
+  "observable_nodes": {
+    "CPU_Usage": "High",
+    "RAM_Usage": "Normal",
+    "API_Latency": "Elevated",
+    "Error_Rate": "Zero"
+  },
+  "faults_active": {
+    "Compute_Overload": true
+  }
+}
+```
+
+---
+
+## 🔹 Prometheus
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+---
+
+# 🧪 Monitoring
+
+Run live monitor:
+
+```bash
+python monitor.py
+```
+
+Shows:
+
+* CPU / RAM / Latency / Errors
+* Active faults
+* PGM observable states
+
+---
+
+# 🧠 PGM Inference Logic
+
+| Observations      | Likely Fault      |
+| ----------------- | ----------------- |
+| CPU ↑ + Latency ↑ | Compute_Overload  |
+| RAM ↑ + Latency ↑ | Memory_Leak       |
+| Latency Timeout   | Network_Partition |
+| Errors ↑ only     | App_Crash         |
+
+---
+
+# 🛠 Troubleshooting
+
+---
+
+## Check logs
+
+```bash
+docker-compose logs -f victim-app
+```
+
+---
+
+## Restart service
+
+```bash
+docker-compose restart victim-app
+```
+
+---
+
+## Full reset
+
+```bash
+docker-compose down -v
+docker-compose up -d --build
+```
+
+---
+
+# ✅ Success Criteria
+
+✔ Containers are healthy
+✔ `/health` returns data
+✔ `/api/metrics` shows correct states
+✔ Faults change metrics correctly
+✔ Prometheus scrapes metrics
+✔ Grafana shows data
+
+---
+
+# 🎯 Summary
+
+This system provides:
+
+* ✔ Clean causal data generation
+* ✔ Single-fault training mode
+* ✔ Real-time observability (Prometheus + Grafana)
+* ✔ Kafka + ML pipeline ready
+
+---
+
+# 🚀 Next Steps
+
+* Train Bayesian Network using `/api/metrics`
+* Stream data to Kafka
+* Build real-time fault inference
+
+---
+
+**Version:** 6.0
+**Status:** Production-ready PGM simulation system
