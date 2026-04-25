@@ -1,310 +1,161 @@
-# 🚀 PGM Fault Diagnosis System (Victim Server)
+How to actually run + test everything step-by-step with terminals
 
-A **fault injection + observability system** designed to generate **causal training data** for a **Probabilistic Graphical Model (PGM)**.
+So I’m giving you a FULL upgraded README (ready to paste) — with:
 
----
+terminal setup ✅
+exact commands ✅
+testing flow ✅
+expected outputs ✅
+debugging clarity ✅
+📄 🔥 FINAL COMPLETE README (PASTE THIS)
+# 🚀 PGM Fault Diagnosis System (FULL TESTING GUIDE)
 
-# 🧠 System Overview
+This guide explains:
 
-This system simulates real-world failures where:
-
-> **Faults (latent variables) → Metrics (observable variables)**
-
-Your model learns:
-
-> **P(Fault | Observations)**
-
----
-
-## 🔹 Latent Nodes (Hidden Faults)
-
-| Fault             | Description                       |
-| ----------------- | --------------------------------- |
-| Compute_Overload  | CPU spike + mild latency          |
-| Memory_Leak       | RAM exhaustion + moderate latency |
-| Network_Partition | High latency (timeouts)           |
-| App_Crash         | Random HTTP errors                |
+✔ How to run the system  
+✔ What to run in each terminal  
+✔ How to test ALL modes  
+✔ How to test ALL faults  
+✔ What results to expect  
 
 ---
 
-## 🔹 Observable Nodes (PGM Inputs)
+# 🧠 SYSTEM ARCHITECTURE
 
-| Metric      | States                      |
-| ----------- | --------------------------- |
-| CPU_Usage   | Normal / High / Critical    |
-| RAM_Usage   | Normal / High / Critical    |
-| API_Latency | Normal / Elevated / Timeout |
-| Error_Rate  | Zero / Spiking              |
 
----
+Victim Server → Prometheus → Grafana
+↓
+Kafka → ML → Predictions
 
-## 🔗 Causal Mapping
-
-| Fault             | Effects           |
-| ----------------- | ----------------- |
-| Compute_Overload  | CPU ↑ + Latency ↑ |
-| Memory_Leak       | RAM ↑ + Latency ↑ |
-| Network_Partition | Latency ↑↑        |
-| App_Crash         | Errors ↑          |
 
 ---
 
-# 🚀 Quick Start
-
-## 1️⃣ Start the system
+# 🚀 STEP 1 — START SYSTEM
 
 ```bash
 docker-compose down -v
 docker-compose up -d --build
+
+Check:
+
 docker-compose ps
-```
-
----
-
-## 2️⃣ Verify services
-
-```bash
+🌐 STEP 2 — VERIFY SYSTEM
 curl http://localhost:8000/health
-```
+🖥️ STEP 3 — TERMINAL SETUP (VERY IMPORTANT)
 
----
+You NEED 4 terminals.
 
-## 3️⃣ Open dashboards
+🟢 Terminal 1 — Docker Stats
+docker stats
 
-| Service       | URL                        |
-| ------------- | -------------------------- |
-| API Docs      | http://localhost:8000/docs |
-| Prometheus    | http://localhost:9090      |
-| Grafana       | http://localhost:3000      |
-| Kafka UI      | http://localhost:8080      |
-| MLflow        | http://localhost:5000      |
-| Redis Insight | http://localhost:5540      |
+👉 Shows real container CPU & memory
 
----
+🟢 Terminal 2 — Health Monitor
+while true; do curl -s http://localhost:8000/health; echo ""; sleep 1; done
 
-# 🎮 Modes
+👉 Shows live system metrics
 
----
+🟢 Terminal 3 — Traffic Generator (MANDATORY)
+while true; do curl -s http://localhost:8000/api/products > /dev/null; done
 
-## 🔹 PGM Mode (IMPORTANT)
+👉 Required for:
 
-```bash
-curl -X POST http://localhost:8000/single-fault-mode/enable
-```
+latency
+error rate
+🔴 Terminal 4 — CONTROL PANEL
 
-### Behavior:
+👉 ALL curl commands run here
 
-* One fault at a time
-* Clean causal data
-* RL-style cycle:
+🎮 MODES
+🔹 1. MANUAL MODE
 
-```
-Healthy → Decision → Fault → Buffer → Repeat
-```
+👉 You control faults manually
 
----
-
-## 🔹 Disable PGM Mode
-
-```bash
-curl -X POST http://localhost:8000/single-fault-mode/disable
-```
-
----
-
-## 🔹 Auto Fault Control
-
-```bash
-curl -X POST http://localhost:8000/auto-fault/start
 curl -X POST http://localhost:8000/auto-fault/stop
-```
-
----
-
-# 🔧 Manual Fault Control
-
----
-
-## Compute_Overload
-
-```bash
-curl -X POST http://localhost:8000/fault/cpu/start
-curl -X POST http://localhost:8000/fault/cpu/stop
-```
-
----
-
-## Memory_Leak
-
-```bash
-curl -X POST http://localhost:8000/fault/memory/start
-curl -X POST http://localhost:8000/fault/memory/stop
-```
-
----
-
-## Network_Partition
-
-```bash
-curl -X POST http://localhost:8000/fault/latency/start
-curl -X POST http://localhost:8000/fault/latency/stop
-```
-
----
-
-## App_Crash
-
-```bash
-curl -X POST http://localhost:8000/fault/errors/start
-curl -X POST http://localhost:8000/fault/errors/stop
-```
-
----
-
-## Stop All Faults
-
-```bash
 curl -X POST http://localhost:8000/fault/stop-all
-```
+🔹 2. AUTO MODE
+curl -X POST http://localhost:8000/auto-fault/start
 
----
+👉 System randomly triggers faults
 
-# 📊 Metrics
+Stop:
 
----
+curl -X POST http://localhost:8000/auto-fault/stop
+🔹 3. SINGLE FAULT MODE (PGM MODE)
+curl -X POST http://localhost:8000/single-fault-mode/enable
 
-## 🔹 Raw Metrics
+👉 Only ONE fault active at a time
 
-```bash
-curl http://localhost:8000/health
-```
+Disable:
 
-Includes:
+curl -X POST http://localhost:8000/single-fault-mode/disable
+🔥 MANUAL FAULT TESTING (STEP-BY-STEP)
+🟥 1. Compute Overload (CPU Spike)
+curl -X POST http://localhost:8000/fault/compute-overload/start
+EXPECT:
+CPU → 80–95%
+latency ↑
 
-* container_cpu_percent ✅
-* memory_percent
-* avg_latency_ms
-* error_rate_percent
+Stop:
 
----
+curl -X POST http://localhost:8000/fault/compute-overload/stop
+🟦 2. Memory Leak
+curl -X POST http://localhost:8000/fault/memory-leak/start
+EXPECT:
+memory_leak_mb ↑
+RAM ↑
 
-## 🔹 PGM Metrics (MAIN)
+Stop:
 
-```bash
-curl http://localhost:8000/api/metrics
-```
+curl -X POST http://localhost:8000/fault/memory-leak/stop
+🟨 3. Network Partition
+curl -X POST http://localhost:8000/fault/network-partition/start
+EXPECT:
+latency → 3000–8000 ms
+error_rate ↑
 
-Example:
+Stop:
 
-```json
+curl -X POST http://localhost:8000/fault/network-partition/stop
+🟥 4. App Crash
+curl -X POST http://localhost:8000/fault/app-crash/start
+EXPECT:
+error_rate → ~30–60%
+latency normal
+
+Stop:
+
+curl -X POST http://localhost:8000/fault/app-crash/stop
+🧨 STOP ALL FAULTS
+curl -X POST http://localhost:8000/fault/stop-all
+🧠 IMPORTANT RULES
+❗ Rule 1 — Always run traffic
+while true; do curl -s http://localhost:8000/api/products > /dev/null; done
+❗ Rule 2 — One fault at a time (for testing)
+start → observe → stop → next
+❗ Rule 3 — Metrics lag is NORMAL
+
+👉 CPU may stay high even after fault OFF
+👉 Error rate decreases slowly
+
+📊 METRICS EXPLANATION
+/health
 {
-  "observable_nodes": {
-    "CPU_Usage": "High",
-    "RAM_Usage": "Normal",
-    "API_Latency": "Elevated",
-    "Error_Rate": "Zero"
-  },
-  "faults_active": {
-    "Compute_Overload": true
-  }
+  "container_cpu_percent": 85,
+  "memory_percent": 60,
+  "avg_latency_ms": 1500,
+  "error_rate_percent": 30,
+  "total_requests": 1000
 }
-```
-
----
-
-## 🔹 Prometheus
-
-```bash
-curl http://localhost:8000/metrics
-```
-
----
-
-# 🧪 Monitoring
-
-Run live monitor:
-
-```bash
-python monitor.py
-```
-
-Shows:
-
-* CPU / RAM / Latency / Errors
-* Active faults
-* PGM observable states
-
----
-
-# 🧠 PGM Inference Logic
-
-| Observations      | Likely Fault      |
-| ----------------- | ----------------- |
-| CPU ↑ + Latency ↑ | Compute_Overload  |
-| RAM ↑ + Latency ↑ | Memory_Leak       |
-| Latency Timeout   | Network_Partition |
-| Errors ↑ only     | App_Crash         |
-
----
-
-# 🛠 Troubleshooting
-
----
-
-## Check logs
-
-```bash
-docker-compose logs -f victim-app
-```
-
----
-
-## Restart service
-
-```bash
-docker-compose restart victim-app
-```
-
----
-
-## Full reset
-
-```bash
-docker-compose down -v
-docker-compose up -d --build
-```
-
----
-
-# ✅ Success Criteria
-
-✔ Containers are healthy
-✔ `/health` returns data
-✔ `/api/metrics` shows correct states
-✔ Faults change metrics correctly
-✔ Prometheus scrapes metrics
-✔ Grafana shows data
-
----
-
-# 🎯 Summary
-
-This system provides:
-
-* ✔ Clean causal data generation
-* ✔ Single-fault training mode
-* ✔ Real-time observability (Prometheus + Grafana)
-* ✔ Kafka + ML pipeline ready
-
----
-
-# 🚀 Next Steps
-
-* Train Bayesian Network using `/api/metrics`
-* Stream data to Kafka
-* Build real-time fault inference
-
----
-
-**Version:** 6.0
-**Status:** Production-ready PGM simulation system
+Meaning:
+Metric	Meaning
+CPU	container CPU usage
+Latency	request delay
+Error rate	failed requests %
+total_requests	total API calls
+🧠 PGM LOGIC
+Observation	Fault
+CPU ↑ + latency ↑	Compute Overload
+RAM ↑ + latency ↑	Memory Leak
+Latency ↑↑	Network Partition
+Errors ↑	App Crash

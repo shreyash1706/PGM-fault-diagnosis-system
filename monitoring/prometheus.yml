@@ -3,7 +3,14 @@ global:
   evaluation_interval: 5s
 
 scrape_configs:
+  # 🔹 Victim Server (Docker)
   - job_name: 'victim-app'
     metrics_path: '/metrics'
     static_configs:
       - targets: ['victim-app:8000']
+
+  # 🔹 ML API (running locally)
+  - job_name: 'ml-api'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['host.docker.internal:8001']

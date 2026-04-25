@@ -52,7 +52,7 @@ def discretize_error_rate(error_rate: float) -> str:
 
 def build_pgm_payload() -> dict:
     """Build the final payload containing structured observations for the Bayesian Net"""
-    cpu_percent = get_prometheus_metric("victim_cpu_percent")
+    cpu_percent = get_prometheus_metric("victim_container_cpu_percent")
     ram_percent = get_prometheus_metric("victim_memory_percent")
     latency_ms = get_prometheus_metric("victim_avg_latency_ms")
     error_rate = get_prometheus_metric("victim_error_rate_percent")

@@ -137,23 +137,27 @@ services:
       timeout: 10s
       retries: 3
 
-  # ============= KAFKA (FIXED) =============
+  # ============= KAFKA (FULLY FIXED) =============
   kafka-broker:
     image: apache/kafka:latest
     container_name: kafka-broker
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
       - KAFKA_NODE_ID=1
       - KAFKA_PROCESS_ROLES=broker,controller
-      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka-broker:9092
-      # ✅ FIXED: Added missing listener configuration
+      # ✅ FIXED: Added DOCKER listener on port 29092
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,DOCKER://0.0.0.0:29092,CONTROLLER://:9093
+      # ✅ FIXED: Separate advertised listeners for local and container access
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092,DOCKER://kafka-broker:29092
       - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      # ✅ FIXED: Added DOCKER to security protocol map
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,DOCKER:PLAINTEXT,CONTROLLER:PLAINTEXT
       - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka-broker:9093
       - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
-      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      # ✅ FIXED: Use DOCKER listener for inter-broker communication
+      - KAFKA_INTER_BROKER_LISTENER_NAME=DOCKER
       - KAFKA_LOG_RETENTION_HOURS=168
       - KAFKA_LOG_SEGMENT_BYTES=1073741824
       - KAFKA_LOG_RETENTION_BYTES=10737418240
@@ -202,7 +206,7 @@ services:
       - fault-network
     environment:
       - KAFKA_CLUSTERS_0_NAME=local
-      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka-broker:9092
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka-broker:29092
     depends_on:
       kafka-broker:
         condition: service_started
