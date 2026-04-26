@@ -430,10 +430,11 @@ async def apply_fault_effects(request: Request, call_next):
 
     total_requests += 1
     start = time.time()
-    error_occurred = False
 
     try:
+        # =========================
         # Apply latency effects
+        # =========================
         if fault_active["Compute_Overload"]:
             await asyncio.sleep(random.uniform(0.5, 2.0))
         elif fault_active["Memory_Leak"]:
@@ -441,30 +442,46 @@ async def apply_fault_effects(request: Request, call_next):
         elif fault_active["Network_Partition"]:
             await asyncio.sleep(random.uniform(3.0, 8.0))
 
+        # =========================
+        # Call actual endpoint
+        # =========================
         response = await call_next(request)
+
         process_time = (time.time() - start) * 1000
         request_times.append(process_time)
-        
-        # Error injection
+
+        # =========================
+        # Decide if error happens
+        # =========================
+        error_occurred = False
+
         if fault_active["Network_Partition"] and random.random() < Config.NETWORK_PARTITION_ERROR_RATE:
             error_occurred = True
-        if fault_active["App_Crash"] and random.random() < Config.APP_CRASH_ERROR_RATE:
+        elif fault_active["App_Crash"] and random.random() < Config.APP_CRASH_ERROR_RATE:
             error_occurred = True
-        
+
+        # ✅ Record EXACTLY ONE outcome
         error_flags.append(1 if error_occurred else 0)
-        
+
+        # =========================
+        # Raise error if needed
+        # =========================
         if error_occurred:
             raise HTTPException(status_code=504, detail="Gateway Timeout")
-        
+
         return response
-        
+
+    # =========================
+    # Exception Handling
+    # =========================
     except HTTPException:
-        error_flags.append(1)
-        raise
-    except Exception:
-        error_flags.append(1)
+        # ❌ DO NOT append again (already counted)
         raise
 
+    except Exception:
+        # ✅ Only unexpected errors counted here
+        error_flags.append(1)
+        raise
 
 # ============================================================================
 # BUSINESS ENDPOINTS
