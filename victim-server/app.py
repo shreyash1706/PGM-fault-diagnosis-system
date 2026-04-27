@@ -13,6 +13,12 @@ Observable Nodes (discrete states):
 - RAM_Usage:    Normal (<40%), High (40-70%), Critical (>70%)
 - API_Latency:  Normal (<200ms), Elevated (200-1000ms), Timeout (>1000ms)
 - Error_Rate:   Zero (<5%), Spiking (>5%)
+
+CAUSAL CONSTRAINTS (STRICTLY ENFORCED):
+- Compute_Overload: ONLY affects CPU_Usage ↑, API_Latency ↑
+- Memory_Leak: ONLY affects RAM_Usage ↑, API_Latency ↑
+- Network_Partition: ONLY affects API_Latency Timeout, Error_Rate ↑
+- App_Crash: ONLY affects Error_Rate ↑
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -41,7 +47,7 @@ logger = logging.getLogger(__name__)
 # GLOBAL VARIABLES
 # ============================================================================
 
-# Fault states - PGM Latent Nodes
+# Fault states - PGM Latent Nodes (ONLY ONE CAN BE TRUE AT A TIME)
 fault_active: Dict[str, bool] = {
     "Compute_Overload": False,
     "Memory_Leak": False,
@@ -52,8 +58,8 @@ fault_active: Dict[str, bool] = {
 # Canonical fault list for schedulers
 FAULT_LIST = ["Compute_Overload", "Memory_Leak", "Network_Partition", "App_Crash"]
 
-# Auto-fault system enabled/disabled
-auto_fault_enabled: bool = True
+# Auto-fault system enabled/disabled (OFF BY DEFAULT for PGM compliance)
+auto_fault_enabled: bool = False
 
 # Single fault mode with buffer (for PGM training)
 single_fault_mode: bool = False
@@ -72,7 +78,7 @@ redis_client = None
 # CPU thread reference
 cpu_thread = None
 
-# ✅ FIXED: CPU delta tracking variables
+# CPU delta tracking variables
 _prev_cpu = None
 _prev_system = None
 
@@ -82,17 +88,8 @@ _prev_system = None
 # ============================================================================
 
 class Config:
-    AUTO_COMPUTE_PROB: float = 0.25
-    AUTO_MEMORY_PROB: float = 0.25
-    AUTO_NETWORK_PROB: float = 0.25
-    AUTO_CRASH_PROB: float = 0.25
+    # Fault durations
     FAULT_DURATION: tuple = (20, 40)
-    
-    # Natural noise (disabled - use only for testing, not for production metrics)
-    CPU_NOISE_PROB: float = 0.0  # ✅ DISABLED - was corrupting metrics
-    CPU_NOISE_RANGE: tuple = (2, 8)
-    LATENCY_NOISE_PROB: float = 0.15
-    LATENCY_NOISE_RANGE: tuple = (0.1, 0.4)
     
     # PGM training mode
     PGM_FAULT_DURATION: float = 30.0
@@ -100,9 +97,13 @@ class Config:
     PGM_BUFFER_MIN: float = 15.0
     PGM_BUFFER_MAX: float = 45.0
     
-    # Error rates
-    NETWORK_PARTITION_ERROR_RATE: float = 0.5
-    APP_CRASH_ERROR_RATE: float = 0.3
+    # Memory leak allocation (ensures >70% RAM)
+    MEMORY_CHUNK_MB: int = 100  # 100MB chunks to guarantee CRITICAL
+    
+    # Deterministic effects (NO PROBABILITY)
+    COMPUTE_LATENCY_MS: float = 600.0  # 1.5 seconds -> Elevated
+    MEMORY_LATENCY_MS: float = 600.0   # 2.0 seconds -> Elevated
+    NETWORK_LATENCY_MS: float = 5000.0  # 5.0 seconds -> Timeout
 
 
 # Track fault timers
@@ -113,7 +114,40 @@ buffer_end_time: float = 0
 
 
 # ============================================================================
-# ✅ FIXED: DELTA-BASED CPU CALCULATION (MATCHES DOCKER)
+# FAULT ISOLATION (CRITICAL: ENFORCES SINGLE FAULT)
+# ============================================================================
+
+def activate_only(fault_name: str):
+    """
+    Ensure ONLY ONE fault is active at any time.
+    This is CRITICAL for PGM causal model.
+    """
+    global fault_active, fault_tasks, memory_leak_data, cpu_thread
+    
+    # Deactivate all faults
+    for f in fault_active:
+        fault_active[f] = False
+    
+    # Cancel all fault tasks
+    for task in fault_tasks.values():
+        task.cancel()
+    fault_tasks.clear()
+    
+    # Clean up memory leak data
+    #memory_leak_data.clear()
+    
+    # Stop CPU thread if running
+    if cpu_thread and cpu_thread.is_alive():
+        # Thread will stop when fault_active["Compute_Overload"] becomes False
+        cpu_thread = None
+    
+    # Activate the requested fault only
+    fault_active[fault_name] = True
+    logger.warning(f"🔄 SINGLE FAULT ACTIVATED: {fault_name}")
+
+
+# ============================================================================
+# DELTA-BASED CPU CALCULATION (MATCHES DOCKER)
 # ============================================================================
 
 def get_container_cpu():
@@ -163,17 +197,17 @@ def get_container_cpu():
 
 
 # ============================================================================
-# STRONG CPU LOAD USING THREAD
+# STRONG CPU LOAD USING THREAD (Compute_Overload)
 # ============================================================================
 
 def run_cpu_hog():
-    """STRONG CPU load - runs in separate thread, blocks CPU fully"""
-    logger.warning("🔥 Compute_Overload (CPU Spike) STARTED - Thread mode")
+    """STRONG CPU load - ensures CPU reaches Critical (>80%)"""
+    logger.warning("🔥 Compute_Overload (CPU Spike) STARTED - Target: Critical CPU")
     while fault_active["Compute_Overload"]:
-        # Heavy CPU computation - 100 million iterations
+        # Heavy CPU computation - ensures sustained high CPU
         for _ in range(100_000_000):
             _ = math.sqrt(_) * math.sin(_) * math.cos(_)
-        # Tiny sleep to prevent complete system freeze
+        # Tiny sleep to prevent complete system freeze but maintain high CPU
         time.sleep(0.001)
     logger.warning("✅ Compute_Overload (CPU Spike) STOPPED")
 
@@ -188,61 +222,44 @@ def start_cpu_hog():
 
 
 # ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-def get_cpu_state(cpu_percent: float) -> str:
-    if cpu_percent >= 80:
-        return "Critical"
-    elif cpu_percent >= 40:
-        return "High"
-    return "Normal"
-
-
-def get_ram_state(ram_percent: float) -> str:
-    if ram_percent >= 70:
-        return "Critical"
-    elif ram_percent >= 40:
-        return "High"
-    return "Normal"
-
-
-def get_latency_state(latency_ms: float) -> str:
-    if latency_ms > 1000:
-        return "Timeout"
-    elif latency_ms > 200:
-        return "Elevated"
-    return "Normal"
-
-
-def get_error_state(error_rate: float) -> str:
-    if error_rate > 5:
-        return "Spiking"
-    return "Zero"
-
-
-# ============================================================================
-# FAULT IMPLEMENTATIONS
+# MEMORY HOG (Memory_Leak) - Ensures RAM >70%
 # ============================================================================
 
 async def memory_hog():
-    """PGM: Memory_Leak - RAM exhaustion simulation"""
     global memory_leak_data
-    chunk_size = 50 * 1024 * 1024
-    logger.warning("💾 Memory_Leak (RAM leak) STARTED")
+    chunk_size = Config.MEMORY_CHUNK_MB * 1024 * 1024
 
-    while fault_active["Memory_Leak"]:
-        memory_leak_data.append(bytearray(chunk_size))
-        total_mb = len(memory_leak_data) * 50
-        logger.info(f"Memory_Leak: {total_mb}MB allocated")
-        for chunk in memory_leak_data:
-            chunk[0] = 1
-        await asyncio.sleep(2)
-    logger.warning("✅ Memory_Leak STOPPED")
+    logger.warning("💾 Memory_Leak STARTED")
 
+    try:
+        while fault_active["Memory_Leak"]:
+            memory_leak_data.append(bytearray(chunk_size))
+
+            # force allocation
+            for chunk in memory_leak_data:
+                chunk[0] = 1
+
+            logger.info(f"Memory_Leak: {len(memory_leak_data) * Config.MEMORY_CHUNK_MB}MB")
+
+            await asyncio.sleep(1)
+
+    except asyncio.CancelledError:
+        logger.warning("Memory_Leak task cancelled")
+        raise
+
+    except Exception as e:
+        logger.error(f"Memory_Leak crashed: {e}")
+
+    finally:
+        logger.warning("💾 Memory_Leak LOOP EXITED")
+
+
+# ============================================================================
+# PGM FAULT SCHEDULER (Single fault mode for training)
+# ============================================================================
 
 async def pgm_fault_scheduler():
-    """Single fault mode scheduler for PGM training"""
+    """Single fault mode scheduler for PGM training - ensures ONE FAULT at a time"""
     global fault_active, fault_end_times, fault_tasks, buffer_active, buffer_end_time, memory_leak_data
 
     while True:
@@ -253,6 +270,7 @@ async def pgm_fault_scheduler():
             if active_faults:
                 fault_name = active_faults[0]
                 if current_time >= fault_end_times.get(fault_name, 0):
+                    # Fault expired - deactivate it
                     fault_active[fault_name] = False
                     logger.info(f"PGM FAULT ENDED: {fault_name}")
 
@@ -263,10 +281,11 @@ async def pgm_fault_scheduler():
                     if fault_name == "Memory_Leak":
                         memory_leak_data.clear()
 
+                    # Start buffer period (healthy state)
                     buffer_duration = random.uniform(Config.PGM_BUFFER_MIN, Config.PGM_BUFFER_MAX)
                     buffer_end_time = current_time + buffer_duration
                     buffer_active = True
-                    logger.info(f"BUFFER: {buffer_duration:.1f}s (no faults)")
+                    logger.info(f"BUFFER PERIOD: {buffer_duration:.1f}s (Healthy state)")
 
                     if fault_name in fault_end_times:
                         del fault_end_times[fault_name]
@@ -274,29 +293,37 @@ async def pgm_fault_scheduler():
             elif buffer_active:
                 if current_time >= buffer_end_time:
                     buffer_active = False
-                    logger.info("BUFFER ENDED - Ready for next fault")
+                    logger.info("BUFFER PERIOD ENDED - Ready for next fault")
 
             elif not buffer_active and not any(fault_active.values()):
+                # Decide next action
                 decision = random.random()
 
                 if decision < Config.PGM_HEALTH_PROBABILITY:
+                    # Healthy period
                     healthy_duration = random.uniform(20, 40)
                     buffer_active = True
                     buffer_end_time = current_time + healthy_duration
                     logger.info(f"PGM: HEALTHY PERIOD for {healthy_duration:.1f}s")
-
                 else:
+                    # Inject single fault
                     fault_name = random.choice(FAULT_LIST)
+                    
+                    # Ensure no other faults are active
+                    for f in fault_active:
+                        fault_active[f] = False
+                    
                     fault_active[fault_name] = True
                     fault_end_times[fault_name] = current_time + Config.PGM_FAULT_DURATION
 
+                    # Start fault-specific background tasks
                     if fault_name == "Compute_Overload":
                         start_cpu_hog()
                     elif fault_name == "Memory_Leak":
                         task = asyncio.create_task(memory_hog())
                         fault_tasks[fault_name] = task
 
-                    logger.warning(f"PGM FAULT: {fault_name} ({Config.PGM_FAULT_DURATION}s)")
+                    logger.warning(f"PGM FAULT INJECTED: {fault_name} ({Config.PGM_FAULT_DURATION}s)")
 
             await asyncio.sleep(1)
 
@@ -305,13 +332,22 @@ async def pgm_fault_scheduler():
             await asyncio.sleep(5)
 
 
+# ============================================================================
+# AUTO FAULT MANAGER (DISABLED BY DEFAULT for PGM compliance)
+# ============================================================================
+
 async def auto_fault_manager():
-    """Automatic fault manager"""
+    """Automatic fault manager - DISABLED by default to prevent multi-faults"""
     global fault_end_times, memory_leak_data, fault_tasks, auto_fault_enabled
 
     if single_fault_mode:
         logger.info("Single Fault Mode ENABLED - PGM training active")
         asyncio.create_task(pgm_fault_scheduler())
+        return
+
+    # Auto fault is OFF by default - do nothing unless manually enabled
+    if not auto_fault_enabled:
+        logger.info("Auto-fault system DISABLED (PGM compliance mode)")
         return
 
     while True:
@@ -336,39 +372,6 @@ async def auto_fault_manager():
             for fault in expired:
                 if fault in fault_end_times:
                     del fault_end_times[fault]
-
-            # Trigger new faults
-            if auto_fault_enabled:
-                if not fault_active["Compute_Overload"] and random.random() < Config.AUTO_COMPUTE_PROB:
-                    duration = random.uniform(*Config.FAULT_DURATION)
-                    fault_active["Compute_Overload"] = True
-                    fault_end_times["Compute_Overload"] = current_time + duration
-                    start_cpu_hog()
-                    logger.warning(f"Compute_Overload for {duration:.1f}s")
-
-                if not fault_active["Memory_Leak"] and random.random() < Config.AUTO_MEMORY_PROB:
-                    duration = random.uniform(*Config.FAULT_DURATION)
-                    fault_active["Memory_Leak"] = True
-                    fault_end_times["Memory_Leak"] = current_time + duration
-                    task = asyncio.create_task(memory_hog())
-                    fault_tasks["Memory_Leak"] = task
-                    logger.warning(f"Memory_Leak for {duration:.1f}s")
-
-                if not fault_active["Network_Partition"] and random.random() < Config.AUTO_NETWORK_PROB:
-                    duration = random.uniform(*Config.FAULT_DURATION)
-                    fault_active["Network_Partition"] = True
-                    fault_end_times["Network_Partition"] = current_time + duration
-                    logger.warning(f"Network_Partition for {duration:.1f}s")
-
-                if not fault_active["App_Crash"] and random.random() < Config.AUTO_CRASH_PROB:
-                    duration = random.uniform(*Config.FAULT_DURATION)
-                    fault_active["App_Crash"] = True
-                    fault_end_times["App_Crash"] = current_time + duration
-                    logger.warning(f"App_Crash for {duration:.1f}s")
-
-            active = [f for f, v in fault_active.items() if v]
-            if len(active) > 1:
-                logger.warning(f"MULTIPLE FAULTS: {active}")
 
             await asyncio.sleep(10)
 
@@ -395,11 +398,16 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(auto_fault_manager())
     logger.info("=" * 60)
-    logger.info("Victim Server Started - PGM Fault Injection")
-    logger.info("  Compute_Overload : 80-95% CPU + mild latency (THREAD MODE)")
-    logger.info("  Memory_Leak      : +50MB/2sec + moderate latency")
-    logger.info("  Network_Partition: severe latency (3-8s) + 50% errors")
-    logger.info("  App_Crash        : 30% error rate")
+    logger.info("Victim Server Started - PGM Fault Injection (STRICT MODE)")
+    logger.info("  ✅ Single fault enforced (ONLY ONE fault at a time)")
+    logger.info("  ✅ Deterministic causal effects")
+    logger.info("  ✅ Auto-fault: OFF by default")
+    logger.info("")
+    logger.info("CAUSAL MODEL:")
+    logger.info("  Compute_Overload  → CPU_Usage ↑, API_Latency ↑")
+    logger.info("  Memory_Leak       → RAM_Usage ↑, API_Latency ↑")
+    logger.info("  Network_Partition → API_Latency Timeout, Error_Rate ↑")
+    logger.info("  App_Crash         → Error_Rate ↑")
     logger.info("=" * 60)
 
     yield
@@ -413,76 +421,77 @@ async def lifespan(app: FastAPI):
 # Create FastAPI application
 app = FastAPI(
     title="Victim Server - PGM Fault Injection",
-    description="Fault injection system for PGM training",
-    version="3.0.0",
+    description="Fault injection system for PGM training - Strict causal enforcement",
+    version="4.0.0",
     lifespan=lifespan
 )
 
 
 # ============================================================================
-# MIDDLEWARE
+# MIDDLEWARE - DETERMINISTIC FAULT EFFECTS
 # ============================================================================
+
+from fastapi.responses import JSONResponse
 
 @app.middleware("http")
 async def apply_fault_effects(request: Request, call_next):
-    """Apply latency and error effects based on active faults"""
+
+    # 🚨 FIX 1: Skip control + metrics endpoints
+    if (
+        request.url.path.startswith("/fault")
+        or request.url.path.startswith("/auto-fault")
+        or request.url.path.startswith("/single-fault-mode")
+        or request.url.path.startswith("/health")
+        or request.url.path.startswith("/metrics")
+        or request.url.path.startswith("/api/metrics")
+    ):
+        return await call_next(request)
+
     global total_requests, request_times, error_flags
 
     total_requests += 1
     start = time.time()
 
     try:
-        # =========================
-        # Apply latency effects
-        # =========================
+        # ================= LATENCY =================
         if fault_active["Compute_Overload"]:
-            await asyncio.sleep(random.uniform(0.5, 2.0))
-        elif fault_active["Memory_Leak"]:
-            await asyncio.sleep(random.uniform(0.5, 2.5))
-        elif fault_active["Network_Partition"]:
-            await asyncio.sleep(random.uniform(3.0, 8.0))
+            await asyncio.sleep(Config.COMPUTE_LATENCY_MS / 1000.0)
 
-        # =========================
-        # Call actual endpoint
-        # =========================
+        elif fault_active["Memory_Leak"]:
+            await asyncio.sleep(Config.MEMORY_LATENCY_MS / 1000.0)
+
+        elif fault_active["Network_Partition"]:
+            await asyncio.sleep(Config.NETWORK_LATENCY_MS / 1000.0)
+
+        # ================= CALL API =================
         response = await call_next(request)
 
         process_time = (time.time() - start) * 1000
         request_times.append(process_time)
 
-        # =========================
-        # Decide if error happens
-        # =========================
+        # ================= ERROR =================
         error_occurred = False
 
-        if fault_active["Network_Partition"] and random.random() < Config.NETWORK_PARTITION_ERROR_RATE:
-            error_occurred = True
-        elif fault_active["App_Crash"] and random.random() < Config.APP_CRASH_ERROR_RATE:
+        if fault_active["Network_Partition"]:
             error_occurred = True
 
-        # ✅ Record EXACTLY ONE outcome
+        elif fault_active["App_Crash"]:
+            error_occurred = True
+
         error_flags.append(1 if error_occurred else 0)
 
-        # =========================
-        # Raise error if needed
-        # =========================
+        # 🚨 FIX 2: RETURN response instead of raising exception
         if error_occurred:
-            raise HTTPException(status_code=504, detail="Gateway Timeout")
+            return JSONResponse(
+                status_code=504,
+                content={"error": "Simulated Failure"}
+            )
 
         return response
 
-    # =========================
-    # Exception Handling
-    # =========================
-    except HTTPException:
-        # ❌ DO NOT append again (already counted)
-        raise
-
     except Exception:
-        # ✅ Only unexpected errors counted here
         error_flags.append(1)
         raise
-
 # ============================================================================
 # BUSINESS ENDPOINTS
 # ============================================================================
@@ -506,21 +515,37 @@ async def get_users():
 
 @app.get("/health")
 async def health():
+    """Health endpoint with comprehensive metrics"""
     global total_requests, request_times, error_flags, memory_leak_data, _prev_cpu, _prev_system
 
-    # ✅ FIXED: Double sampling for proper delta calculation
-    container_cpu = get_container_cpu()
-    time.sleep(0.1)  # Small delay to get meaningful delta
-    container_cpu = get_container_cpu()
+    # Get CPU with proper delta calculation
+    # ================= FIXED CPU =================
+    process = psutil.Process()
+    container_cpu = process.cpu_percent(interval=0.5)
+    # ============================================
     
     system_cpu = psutil.cpu_percent(interval=0.1)
-    mem = psutil.virtual_memory().percent
+    # ================= FIXED MEMORY =================
+    try:
+        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes", "r") as f:
+            usage = int(f.read().strip())
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r") as f:
+            limit = int(f.read().strip())
+        
+        mem = (usage / limit) * 100 if limit > 0 else 0.0
+    except:
+        mem = psutil.virtual_memory().percent
+        # ==============================================
 
-    avg_lat = sum(request_times) / len(request_times) if request_times else 0
+    avg_lat = request_times[-1] if request_times else 0
     err_rate = (sum(error_flags) / len(error_flags) * 100) if error_flags else 0
 
-    # ✅ REMOVED: Fake CPU noise that was corrupting metrics
-    # No random CPU addition anymore
+    # Count active faults (should be 0 or 1 in PGM mode)
+    active_faults = [f for f, v in fault_active.items() if v]
+    multiple_faults = len(active_faults) > 1
+
+    if multiple_faults:
+        logger.error(f"⚠️ MULTIPLE FAULTS DETECTED: {active_faults} - PGM constraint violated!")
 
     return {
         "timestamp": datetime.now().isoformat(),
@@ -531,10 +556,11 @@ async def health():
             "avg_latency_ms": round(avg_lat, 2),
             "error_rate_percent": round(err_rate, 2),
             "total_requests": total_requests,
-            "memory_leak_mb": len(memory_leak_data) * 50
+            "memory_leak_mb": len(memory_leak_data) * Config.MEMORY_CHUNK_MB
         },
         "faults_active": fault_active,
-        "multiple_faults": sum(fault_active.values()) > 1,
+        "active_fault_count": len(active_faults),
+        "multiple_faults": multiple_faults,
         "auto_fault_enabled": auto_fault_enabled,
         "single_fault_mode": single_fault_mode,
         "buffer_active": buffer_active if single_fault_mode else None
@@ -547,10 +573,36 @@ async def get_metrics():
     health_data = await health()
     m = health_data["metrics"]
 
-    cpu_state = get_cpu_state(m["container_cpu_percent"])
-    ram_state = get_ram_state(m["memory_percent"])
-    latency_state = get_latency_state(m["avg_latency_ms"])
-    error_state = get_error_state(m["error_rate_percent"])
+    # EXACT DISCRETIZATION THRESHOLDS (match training data)
+    # CPU: Normal <40%, High 40-80%, Critical >80%
+    if m["container_cpu_percent"] >= 80:
+        cpu_state = "Critical"
+    elif m["container_cpu_percent"] >= 40:
+        cpu_state = "High"
+    else:
+        cpu_state = "Normal"
+    
+    # RAM: Normal <40%, High 40-70%, Critical >70%
+    if m["memory_percent"] >= 70:
+        ram_state = "Critical"
+    elif m["memory_percent"] >= 40:
+        ram_state = "High"
+    else:
+        ram_state = "Normal"
+    
+    # Latency: Normal <200ms, Elevated 200-1000ms, Timeout >1000ms
+    if m["avg_latency_ms"] > 1000:
+        latency_state = "Timeout"
+    elif m["avg_latency_ms"] > 200:
+        latency_state = "Elevated"
+    else:
+        latency_state = "Normal"
+    
+    # Error: Zero <5%, Spiking >5%
+    if m["error_rate_percent"] > 5:
+        error_state = "Spiking"
+    else:
+        error_state = "Zero"
 
     return {
         "timestamp": health_data["timestamp"],
@@ -572,6 +624,13 @@ async def get_prometheus_format():
     health_data = await health()
     m = health_data["metrics"]
 
+    # Determine active fault for Prometheus (should be only ONE)
+    active_fault_name = "None"
+    for fault_name, is_active in fault_active.items():
+        if is_active:
+            active_fault_name = fault_name
+            break
+
     return "\n".join([
         "# HELP victim_container_cpu_percent Container CPU usage",
         "# TYPE victim_container_cpu_percent gauge",
@@ -591,6 +650,9 @@ async def get_prometheus_format():
         "# HELP victim_memory_leak_mb Memory leaked so far",
         "# TYPE victim_memory_leak_mb gauge",
         f'victim_memory_leak_mb {m["memory_leak_mb"]}',
+        "# HELP victim_active_fault Currently active fault",
+        "# TYPE victim_active_fault gauge",
+        f'victim_active_fault {1 if active_fault_name != "None" else 0}',
         "# HELP victim_fault_compute_overload Compute_Overload active",
         "# TYPE victim_fault_compute_overload gauge",
         f'victim_fault_compute_overload {1 if fault_active["Compute_Overload"] else 0}',
@@ -622,17 +684,19 @@ async def stop_auto_faults():
 async def start_auto_faults():
     global auto_fault_enabled
     auto_fault_enabled = True
-    logger.info("Auto-fault system ENABLED")
+    logger.warning("⚠️ Auto-fault system ENABLED - May violate PGM constraints if multiple faults occur")
     return {"status": "success", "auto_fault_enabled": auto_fault_enabled}
 
 
 @app.post("/single-fault-mode/enable")
 async def enable_single_fault_mode():
-    global single_fault_mode, fault_active, fault_tasks, memory_leak_data, buffer_active
+    """Enable PGM training mode - strictly enforces single fault"""
+    global single_fault_mode, fault_active, fault_tasks, memory_leak_data, buffer_active, auto_fault_enabled
 
     if single_fault_mode:
         return {"status": "warning", "message": "Already enabled"}
 
+    # Clear all active faults
     for fault in fault_active:
         fault_active[fault] = False
     for task in fault_tasks.values():
@@ -640,19 +704,29 @@ async def enable_single_fault_mode():
     fault_tasks.clear()
     memory_leak_data.clear()
     buffer_active = False
+    
+    # Disable auto-fault in single fault mode
+    auto_fault_enabled = False
     single_fault_mode = True
 
+    logger.warning("=" * 60)
     logger.warning("SINGLE FAULT MODE ENABLED - PGM training active")
+    logger.warning("✅ Only ONE fault will be active at a time")
+    logger.warning("✅ Deterministic causal effects enforced")
+    logger.warning("=" * 60)
+    
     return {"status": "success", "single_fault_mode": single_fault_mode}
 
 
 @app.post("/single-fault-mode/disable")
 async def disable_single_fault_mode():
+    """Disable PGM training mode"""
     global single_fault_mode, fault_active, fault_tasks, memory_leak_data, buffer_active
 
     if not single_fault_mode:
         return {"status": "warning", "message": "Already disabled"}
 
+    # Clear all active faults
     for fault in fault_active:
         fault_active[fault] = False
     for task in fault_tasks.values():
@@ -668,80 +742,103 @@ async def disable_single_fault_mode():
 
 @app.post("/fault/compute-overload/{action}")
 async def compute_overload_control(action: str):
-    if single_fault_mode and action == "start":
-        if any(fault_active.values()):
-            active_faults = [f for f, v in fault_active.items() if v]
-            raise HTTPException(409, f"Fault '{active_faults[0]}' already active")
-
+    """Control Compute_Overload fault - STRICTLY enforces single fault"""
     if action == "start":
-        fault_active["Compute_Overload"] = True
+        # Enforce single fault constraint
+        if single_fault_mode and any(fault_active.values()):
+            active_faults = [f for f, v in fault_active.items() if v]
+            raise HTTPException(409, f"Cannot start Compute_Overload: Fault '{active_faults[0]}' already active (PGM single fault constraint)")
+        
+        activate_only("Compute_Overload")
         start_cpu_hog()
-        return {"message": "Compute_Overload STARTED"}
+        logger.warning("🚀 Compute_Overload STARTED - CPU will spike to Critical")
+        return {"message": "Compute_Overload STARTED", "active_fault": "Compute_Overload"}
+        
     elif action == "stop":
         fault_active["Compute_Overload"] = False
+        logger.info("Compute_Overload STOPPED")
         return {"message": "Compute_Overload STOPPED"}
+        
     raise HTTPException(400, "Invalid action. Use 'start' or 'stop'.")
 
 
 @app.post("/fault/memory-leak/{action}")
 async def memory_leak_control(action: str):
+    """Control Memory_Leak fault - STRICTLY enforces single fault"""
     global memory_leak_data, fault_tasks
 
-    if single_fault_mode and action == "start":
-        if any(fault_active.values()):
-            active_faults = [f for f, v in fault_active.items() if v]
-            raise HTTPException(409, f"Fault '{active_faults[0]}' already active")
-
     if action == "start":
-        fault_active["Memory_Leak"] = True
+        # Enforce single fault constraint
+        if single_fault_mode and any(fault_active.values()):
+            active_faults = [f for f, v in fault_active.items() if v]
+            raise HTTPException(409, f"Cannot start Memory_Leak: Fault '{active_faults[0]}' already active (PGM single fault constraint)")
+        
+        activate_only("Memory_Leak")
+        
         if "Memory_Leak" in fault_tasks:
             fault_tasks["Memory_Leak"].cancel()
         fault_tasks["Memory_Leak"] = asyncio.create_task(memory_hog())
-        return {"message": "Memory_Leak STARTED"}
+        
+        logger.warning("💾 Memory_Leak STARTED - RAM will rise to Critical")
+        return {"message": "Memory_Leak STARTED", "active_fault": "Memory_Leak"}
+        
     elif action == "stop":
         fault_active["Memory_Leak"] = False
         if "Memory_Leak" in fault_tasks:
             fault_tasks["Memory_Leak"].cancel()
             del fault_tasks["Memory_Leak"]
         memory_leak_data.clear()
+        logger.info("Memory_Leak STOPPED")
         return {"message": "Memory_Leak STOPPED"}
+        
     raise HTTPException(400, "Invalid action. Use 'start' or 'stop'.")
 
 
 @app.post("/fault/network-partition/{action}")
 async def network_partition_control(action: str):
-    if single_fault_mode and action == "start":
-        if any(fault_active.values()):
-            active_faults = [f for f, v in fault_active.items() if v]
-            raise HTTPException(409, f"Fault '{active_faults[0]}' already active")
-
+    """Control Network_Partition fault - STRICTLY enforces single fault"""
     if action == "start":
-        fault_active["Network_Partition"] = True
-        return {"message": "Network_Partition STARTED"}
+        # Enforce single fault constraint
+        if single_fault_mode and any(fault_active.values()):
+            active_faults = [f for f, v in fault_active.items() if v]
+            raise HTTPException(409, f"Cannot start Network_Partition: Fault '{active_faults[0]}' already active (PGM single fault constraint)")
+        
+        activate_only("Network_Partition")
+        logger.warning("🌐 Network_Partition STARTED - Latency will spike to Timeout, errors will spike")
+        return {"message": "Network_Partition STARTED", "active_fault": "Network_Partition"}
+        
     elif action == "stop":
         fault_active["Network_Partition"] = False
+        logger.info("Network_Partition STOPPED")
         return {"message": "Network_Partition STOPPED"}
+        
     raise HTTPException(400, "Invalid action. Use 'start' or 'stop'.")
 
 
 @app.post("/fault/app-crash/{action}")
 async def app_crash_control(action: str):
-    if single_fault_mode and action == "start":
-        if any(fault_active.values()):
-            active_faults = [f for f, v in fault_active.items() if v]
-            raise HTTPException(409, f"Fault '{active_faults[0]}' already active")
-
+    """Control App_Crash fault - STRICTLY enforces single fault"""
     if action == "start":
-        fault_active["App_Crash"] = True
-        return {"message": "App_Crash STARTED"}
+        # Enforce single fault constraint
+        if single_fault_mode and any(fault_active.values()):
+            active_faults = [f for f, v in fault_active.items() if v]
+            raise HTTPException(409, f"Cannot start App_Crash: Fault '{active_faults[0]}' already active (PGM single fault constraint)")
+        
+        activate_only("App_Crash")
+        logger.warning("💥 App_Crash STARTED - Error rate will spike to Spiking")
+        return {"message": "App_Crash STARTED", "active_fault": "App_Crash"}
+        
     elif action == "stop":
         fault_active["App_Crash"] = False
+        logger.info("App_Crash STOPPED")
         return {"message": "App_Crash STOPPED"}
+        
     raise HTTPException(400, "Invalid action. Use 'start' or 'stop'.")
 
 
 @app.post("/fault/stop-all")
 async def stop_all_faults():
+    """Emergency stop - deactivates all faults"""
     global fault_active, memory_leak_data, fault_tasks, fault_end_times, buffer_active
 
     for fault in fault_active:
@@ -754,23 +851,47 @@ async def stop_all_faults():
     if single_fault_mode:
         buffer_active = False
 
-    logger.warning("ALL FAULTS STOPPED")
-    return {"status": "success", "faults_active": fault_active}
+    logger.warning("🛑 ALL FAULTS STOPPED - System returning to Healthy state")
+    return {"status": "success", "faults_active": fault_active, "system_state": "Healthy"}
 
 
 @app.get("/")
 async def root():
+    """Root endpoint with PGM model information"""
+    active_faults = [f for f, v in fault_active.items() if v]
+    
     return {
         "server": "Victim Server - PGM Fault Injection",
-        "version": "3.0.0",
-        "faults_active": fault_active,
-        "auto_fault_enabled": auto_fault_enabled,
-        "single_fault_mode": single_fault_mode,
+        "version": "4.0.0",
+        "pgm_compliance": {
+            "single_fault_enforced": single_fault_mode or len(active_faults) <= 1,
+            "active_faults": active_faults,
+            "auto_fault_enabled": auto_fault_enabled,
+            "single_fault_mode": single_fault_mode
+        },
         "causal_model": {
-            "Compute_Overload": "→ CPU_Usage ↑, API_Latency ↑",
-            "Memory_Leak": "→ RAM_Usage ↑, API_Latency ↑",
-            "Network_Partition": "→ API_Latency Timeout, Error_Rate ↑",
-            "App_Crash": "→ Error_Rate ↑"
+            "Compute_Overload": {
+                "effects": ["CPU_Usage → Critical/High", "API_Latency → Elevated"],
+                "no_effects": ["RAM_Usage", "Error_Rate"]
+            },
+            "Memory_Leak": {
+                "effects": ["RAM_Usage → Critical/High", "API_Latency → Elevated"],
+                "no_effects": ["CPU_Usage", "Error_Rate"]
+            },
+            "Network_Partition": {
+                "effects": ["API_Latency → Timeout", "Error_Rate → Spiking"],
+                "no_effects": ["CPU_Usage", "RAM_Usage"]
+            },
+            "App_Crash": {
+                "effects": ["Error_Rate → Spiking"],
+                "no_effects": ["CPU_Usage", "RAM_Usage", "API_Latency"]
+            }
+        },
+        "discretization_thresholds": {
+            "CPU_Usage": {"Normal": "<40%", "High": "40-80%", "Critical": ">80%"},
+            "RAM_Usage": {"Normal": "<40%", "High": "40-70%", "Critical": ">70%"},
+            "API_Latency": {"Normal": "<200ms", "Elevated": "200-1000ms", "Timeout": ">1000ms"},
+            "Error_Rate": {"Zero": "<5%", "Spiking": ">5%"}
         }
     }
 

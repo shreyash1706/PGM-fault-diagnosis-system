@@ -31,14 +31,15 @@ def get_prometheus_metric(query: str, default_value=0.0) -> float:
 # ================= Discrete Logic (The Bayesian Node Mapping) =================
 # We categorize raw technical metrics into the semantic states expected by
 # the Probabilistic Graphical Model defined in nodes.md
+# ✅ FIXED: Exact thresholds matching training data and victim server
 def discretize_cpu(cpu_percent: float) -> str:
     if cpu_percent >= 80: return "Critical"
-    if cpu_percent >= 30: return "High"
+    if cpu_percent >= 40: return "High"
     return "Normal"
 
 def discretize_ram(ram_percent: float) -> str:
-    if ram_percent >= 50: return "Critical"
-    if ram_percent >= 35: return "High"
+    if ram_percent >= 70: return "Critical"
+    if ram_percent >= 50: return "High"
     return "Normal"
 
 def discretize_latency(latency_ms: float) -> str:
@@ -47,8 +48,22 @@ def discretize_latency(latency_ms: float) -> str:
     return "Normal"
 
 def discretize_error_rate(error_rate: float) -> str:
-    if error_rate >= 40: return "Spiking"
+    if error_rate > 5: return "Spiking"
     return "Zero"
+
+# ✅ FIXED: Correct Prometheus metric names matching victim server
+def get_active_fault() -> str:
+    """Determine active fault from Prometheus metrics - single fault only"""
+    if get_prometheus_metric("victim_fault_compute_overload") == 1:
+        return "Compute_Overload"
+    elif get_prometheus_metric("victim_fault_memory_leak") == 1:
+        return "Memory_Leak"
+    elif get_prometheus_metric("victim_fault_network_partition") == 1:
+        return "Network_Partition"
+    elif get_prometheus_metric("victim_fault_app_crash") == 1:
+        return "App_Crash"
+    else:
+        return "Healthy"
 
 def build_pgm_payload() -> dict:
     """Build the final payload containing structured observations for the Bayesian Net"""
@@ -56,16 +71,7 @@ def build_pgm_payload() -> dict:
     ram_percent = get_prometheus_metric("victim_memory_percent")
     latency_ms = get_prometheus_metric("victim_avg_latency_ms")
     error_rate = get_prometheus_metric("victim_error_rate_percent")
-    active_fault = ""
-    if get_prometheus_metric("victim_fault_cpu_spike"):
-        active_fault = "CPU_SPIKE"
-    if get_prometheus_metric("victim_fault_memory_leak"):
-        active_fault = "MEMORY_LEAK"
-    if get_prometheus_metric("victim_fault_api_latency"):
-            active_fault = "NEWTORK_PARTITION"
-    if get_prometheus_metric("victim_fault_error_rate"):
-        active_fault = "APP_CRASH"        
-            
+
     return {
         "timestamp": int(time.time() * 1000),
         "observable_nodes": {
@@ -75,12 +81,12 @@ def build_pgm_payload() -> dict:
             "Error_Rate": discretize_error_rate(error_rate)
         },
         "raw_metrics": {
-            "cpu_percent": round(float(cpu_percent), 2),
-            "ram_percent": round(float(ram_percent), 2),
-            "latency_ms": round(float(latency_ms), 2),
-            "error_rate": round(float(error_rate), 2)
+            "cpu_percent": round(cpu_percent, 2),
+            "ram_percent": round(ram_percent, 2),
+            "latency_ms": round(latency_ms, 2),
+            "error_rate": round(error_rate, 2)
         },
-        "active_fault": active_fault
+        "active_fault": get_active_fault()
     }
 
 def main():
