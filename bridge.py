@@ -48,7 +48,7 @@ def discretize_latency(latency_ms: float) -> str:
     return "Normal"
 
 def discretize_error_rate(error_rate: float) -> str:
-    if error_rate > 5: return "Spiking"
+    if error_rate > 15: return "Spiking"
     return "Zero"
 
 # ✅ FIXED: Correct Prometheus metric names matching victim server
